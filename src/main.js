@@ -35,6 +35,7 @@ const panelClose = document.querySelector("#panel-close");
 const panelName = document.querySelector("#panel-name");
 const panelAddress = document.querySelector("#panel-address");
 const panelRating = document.querySelector("#panel-rating");
+const panelNavLink = document.querySelector("#panel-nav-link");
 const panelScore = document.querySelector("#panel-score");
 const panelScoreFill = document.querySelector("#panel-score-fill");
 const panelSunLine = document.querySelector("#panel-sun-line");
@@ -66,6 +67,8 @@ let selectedCafe = null;
 let selectedCafeIndex = -1;
 let googleMapsApi = null;
 let sunnyMap = null;
+let cafeHoverWindow = null;
+let recommendationResetTimer = null;
 let usingShadowApproximation = false;
 let buildingStats = {
   count: 0,
@@ -539,17 +542,30 @@ function updateSunStatus(sunData) {
   );
 }
 
+function resetRecommendationHighlights() {
+  if (recommendationResetTimer) {
+    window.clearTimeout(recommendationResetTimer);
+    recommendationResetTimer = null;
+  }
+
+  cafeMarkers.forEach((marker) => {
+    marker.setZIndex(null);
+  });
+}
+
 function applySunScores() {
   if (!loadedCafes.length || !cafeMarkers.length) {
     return null;
   }
 
+  resetRecommendationHighlights();
   const sunData = getSunDataAt(Number(timeSlider.value));
 
   cafeMarkers.forEach((marker, index) => {
     const cafe = loadedCafes[index];
     const score = calculateSunScore(cafe, sunData);
     marker.setIcon(getMarkerIconForScore(score));
+    marker.setZIndex(null);
   });
 
   updateSunStatus(sunData);
@@ -760,6 +776,27 @@ function getPlaceName(place) {
   return place.displayName?.text ?? "Cihangir cafe";
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function getCafeNavigationUrl(cafe) {
+  const position = getPlacePosition(cafe);
+
+  if (position) {
+    return `https://www.google.com/maps/dir/?api=1&destination=${position.lat},${position.lng}&travelmode=walking`;
+  }
+
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+    `${getPlaceName(cafe)} ${cafe.formattedAddress ?? ""}`,
+  )}`;
+}
+
 function formatWeatherChip(weather) {
   return `${Math.round(weather.temperature_2m)}°C · ${Math.round(
     weather.wind_speed_10m,
@@ -931,6 +968,9 @@ function showCafeRecommendations(answerText) {
 
   openDetailPanel(firstCafe, firstIndex);
   setStatus(`Showing ${indexes.length} Sunside recommendation${indexes.length > 1 ? "s" : ""}`, "ready");
+  recommendationResetTimer = window.setTimeout(() => {
+    applySunScores();
+  }, 12000);
 }
 
 async function askClaude(message) {
@@ -1153,6 +1193,7 @@ function renderDetailPanel(cafe, index) {
 
   panelName.textContent = getPlaceName(cafe);
   panelAddress.textContent = cafe.formattedAddress ?? "Address unavailable";
+  panelNavLink.href = getCafeNavigationUrl(cafe);
 
   if (typeof cafe.rating === "number") {
     panelRating.hidden = false;
@@ -1200,6 +1241,10 @@ function renderCafeMarkers(maps, map, cafes) {
   cafeMarkers.forEach((marker) => marker.setMap(null));
   cafeMarkers.length = 0;
   loadedCafes = cafes;
+  cafeHoverWindow = new maps.InfoWindow({
+    disableAutoPan: true,
+    pixelOffset: new maps.Size(0, -8),
+  });
 
   cafes.forEach((cafe, index) => {
     const position = getPlacePosition(cafe);
@@ -1219,7 +1264,24 @@ function renderCafeMarkers(maps, map, cafes) {
 
     marker.addListener("click", () => {
       console.log("Sunside cafe marker clicked", cafe);
+      resetRecommendationHighlights();
+      applySunScores();
       openDetailPanel(cafe, index);
+    });
+
+    marker.addListener("mouseover", () => {
+      cafeHoverWindow.setContent(
+        `<div class="map-tooltip">${escapeHtml(getPlaceName(cafe))}</div>`,
+      );
+      cafeHoverWindow.open({
+        anchor: marker,
+        map,
+        shouldFocus: false,
+      });
+    });
+
+    marker.addListener("mouseout", () => {
+      cafeHoverWindow.close();
     });
 
     cafeMarkers.push(marker);
