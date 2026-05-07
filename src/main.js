@@ -1,0 +1,1548 @@
+import SunCalc from "suncalc";
+import "./style.css";
+
+const CIHANGIR = { lat: 41.0327, lng: 28.9818 };
+const TAKSIM = { lat: 41.0369, lng: 28.985 };
+const DEFAULT_HOUR = new Date().getHours();
+const START_HOUR = 6;
+const END_HOUR = 20;
+const ENABLE_SHADOWS = false;
+const WALKING_FACTOR = 1.4;
+const WALKING_METERS_PER_MINUTE = 80;
+const PLACES_CACHE_KEY = "places-cihangir-v1";
+const WEATHER_CACHE_KEY = "weather-cihangir-v1";
+const BUILDINGS_CACHE_KEY = "buildings-cihangir-v1";
+const SOLAR_CACHE_PREFIX = "solar-cihangir-v1:";
+const PLACES_URL = "https://places.googleapis.com/v1/places:searchNearby";
+const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
+const OVERPASS_BODY = `[out:json][timeout:25];
+(way["building"](41.0285,28.9760,41.0380,28.9880);
+ relation["building"](41.0285,28.9760,41.0380,28.9880););
+out body;
+>;
+out skel qt;`;
+const WEATHER_URL =
+  "https://api.open-meteo.com/v1/forecast?latitude=41.0327&longitude=28.9818&current=temperature_2m,apparent_temperature,wind_speed_10m,wind_direction_10m";
+const PLACES_FIELD_MASK =
+  "places.id,places.displayName,places.location,places.outdoorSeating,places.currentOpeningHours,places.rating,places.formattedAddress";
+
+const timeSlider = document.querySelector("#time-slider");
+const timeLabel = document.querySelector("#time-label");
+const mapStatus = document.querySelector("#map-status");
+const cafeStatusText = document.querySelector("#cafe-status-text");
+const detailPanel = document.querySelector("#detail-panel");
+const panelClose = document.querySelector("#panel-close");
+const panelName = document.querySelector("#panel-name");
+const panelAddress = document.querySelector("#panel-address");
+const panelRating = document.querySelector("#panel-rating");
+const panelScore = document.querySelector("#panel-score");
+const panelScoreFill = document.querySelector("#panel-score-fill");
+const panelSunLine = document.querySelector("#panel-sun-line");
+const panelOutdoor = document.querySelector("#panel-outdoor");
+const panelDistance = document.querySelector("#panel-distance");
+const panelTemperature = document.querySelector("#panel-temperature");
+const panelWind = document.querySelector("#panel-wind");
+const panelSolarDivider = document.querySelector("#panel-solar-divider");
+const panelSolarSection = document.querySelector("#panel-solar-section");
+const panelSolar = document.querySelector("#panel-solar");
+const chatFab = document.querySelector("#chat-fab");
+const chatPanel = document.querySelector("#chat-panel");
+const chatClose = document.querySelector("#chat-close");
+const chatMessages = document.querySelector("#chat-messages");
+const chatForm = document.querySelector("#chat-form");
+const chatInput = document.querySelector("#chat-input");
+const chatSend = document.querySelector("#chat-send");
+
+const markerIcons = {};
+const cafeMarkers = [];
+const solarByPlaceId = new Map();
+const solarFailures = new Map();
+const solarPending = new Set();
+const buildingPolygons = [];
+let loadedCafes = [];
+let currentWeather = null;
+let userPosition = TAKSIM;
+let selectedCafe = null;
+let selectedCafeIndex = -1;
+let googleMapsApi = null;
+let sunnyMap = null;
+let usingShadowApproximation = false;
+let buildingStats = {
+  count: 0,
+  precomputeMs: 0,
+  overlayCount: 0,
+  status: "idle",
+};
+let solarProgress = { total: 0, completed: 0, success: 0, failed: 0, done: false };
+
+const mapStyles = [
+  { elementType: "geometry", stylers: [{ color: "#15130f" }] },
+  { elementType: "labels.icon", stylers: [{ visibility: "off" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#a9a39a" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#12110e" }] },
+  {
+    featureType: "administrative",
+    elementType: "geometry.stroke",
+    stylers: [{ color: "#2b2924" }],
+  },
+  {
+    featureType: "poi",
+    elementType: "geometry",
+    stylers: [{ color: "#1b1914" }],
+  },
+  {
+    featureType: "poi.park",
+    elementType: "geometry",
+    stylers: [{ color: "#172419" }],
+  },
+  {
+    featureType: "road",
+    elementType: "geometry",
+    stylers: [{ color: "#3b362e" }],
+  },
+  {
+    featureType: "road",
+    elementType: "geometry.stroke",
+    stylers: [{ color: "#211e19" }],
+  },
+  {
+    featureType: "road",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#a19a8e" }],
+  },
+  {
+    featureType: "transit",
+    elementType: "geometry",
+    stylers: [{ color: "#1d1b17" }],
+  },
+  {
+    featureType: "water",
+    elementType: "geometry",
+    stylers: [{ color: "#071018" }],
+  },
+  {
+    featureType: "water",
+    elementType: "labels.text.fill",
+    stylers: [{ color: "#4c6472" }],
+  },
+];
+
+function clampHour(hour) {
+  return Math.min(END_HOUR, Math.max(START_HOUR, hour));
+}
+
+function formatHour(value) {
+  return `${String(value).padStart(2, "0")}:00`;
+}
+
+function syncTimeLabel() {
+  const hour = Number(timeSlider.value);
+  const progress = ((hour - START_HOUR) / (END_HOUR - START_HOUR)) * 100;
+  timeLabel.textContent = formatHour(hour);
+  timeSlider.style.setProperty("--slider-progress", `${progress}%`);
+}
+
+function degreesFromRadians(radians) {
+  return (radians * 180) / Math.PI;
+}
+
+function normalizeDegrees(degrees) {
+  return (degrees + 360) % 360;
+}
+
+function getCompassDirection(degrees) {
+  const directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  return directions[Math.round(normalizeDegrees(degrees) / 45) % 8];
+}
+
+function getSunDataAt(hour) {
+  const date = new Date();
+  date.setHours(hour, 0, 0, 0);
+
+  const position = SunCalc.getPosition(date, CIHANGIR.lat, CIHANGIR.lng);
+
+  return {
+    azimuth: normalizeDegrees(degreesFromRadians(position.azimuth) + 180),
+    altitude: degreesFromRadians(position.altitude),
+  };
+}
+
+function calculateSunScore(cafe, sunData) {
+  let score;
+
+  if (sunData.altitude < 5) {
+    score = 0;
+  } else if (sunData.altitude < 15) {
+    score = 30;
+  } else if (sunData.altitude > 50) {
+    score = 100;
+  } else {
+    score = 60;
+  }
+
+  if (cafe.outdoorSeating === true) {
+    score += 10;
+  }
+
+  if (cafe.outdoorSeating === false) {
+    score -= 20;
+  }
+
+  return Math.min(100, Math.max(0, score));
+}
+
+function calculateFallbackScore(cafe, hour) {
+  return calculateSunScore(cafe, getSunDataAt(hour));
+}
+
+function getScoreForCafeAtHour(cafe, hour) {
+  if (!ENABLE_SHADOWS) {
+    return calculateFallbackScore(cafe, hour);
+  }
+
+  return (
+    cafe.precomputedScores?.[hour] ??
+    cafe.precomputedScores?.[String(hour)] ??
+    calculateFallbackScore(cafe, hour)
+  );
+}
+
+function applyOutdoorSeatingBonus(cafe, score) {
+  let adjustedScore = score;
+
+  if (cafe.outdoorSeating === true) {
+    adjustedScore += 10;
+  }
+
+  if (cafe.outdoorSeating === false) {
+    adjustedScore -= 20;
+  }
+
+  return Math.min(100, Math.max(0, adjustedScore));
+}
+
+function parseMeters(value) {
+  if (!value) {
+    return null;
+  }
+
+  const match = String(value).replace(",", ".").match(/-?\d+(\.\d+)?/);
+  const meters = match ? Number(match[0]) : NaN;
+
+  return Number.isFinite(meters) && meters > 0 ? meters : null;
+}
+
+function estimateBuildingHeight(tags = {}) {
+  const explicitHeight = parseMeters(tags.height);
+
+  if (explicitHeight) {
+    return explicitHeight;
+  }
+
+  const levels = parseMeters(tags["building:levels"]);
+
+  if (levels) {
+    return levels * 3;
+  }
+
+  return 12;
+}
+
+function getCachedBuildings() {
+  return getCachedJson(BUILDINGS_CACHE_KEY);
+}
+
+async function fetchBuildingData() {
+  if (!ENABLE_SHADOWS) {
+    throw new Error("Shadow approximation disabled for demo stability");
+  }
+
+  const cached = getCachedBuildings();
+
+  if (cached?.elements) {
+    return cached;
+  }
+
+  setCafeStatus("Loading building data...", "ready");
+
+  const response = await fetch(OVERPASS_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/plain",
+    },
+    body: OVERPASS_BODY,
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    console.warn("Overpass API failed", {
+      status: response.status,
+      statusText: response.statusText,
+      body,
+    });
+    throw new Error(`Overpass API error ${response.status}`);
+  }
+
+  const data = await response.json();
+  localStorage.setItem(BUILDINGS_CACHE_KEY, JSON.stringify(data));
+  return data;
+}
+
+function parseBuildingPolygons(overpassData) {
+  const nodes = new Map();
+  const ways = new Map();
+  const buildings = [];
+  const seen = new Set();
+
+  for (const element of overpassData?.elements ?? []) {
+    if (element.type === "node") {
+      nodes.set(element.id, [element.lat, element.lon]);
+    }
+
+    if (element.type === "way") {
+      ways.set(element.id, element);
+    }
+  }
+
+  function addWayAsBuilding(way, tags = way.tags, id = `way-${way.id}`) {
+    if (seen.has(id) || !Array.isArray(way.nodes) || way.nodes.length < 3) {
+      return;
+    }
+
+    const polygon = way.nodes
+      .map((nodeId) => nodes.get(nodeId))
+      .filter(Boolean);
+
+    if (polygon.length < 3) {
+      return;
+    }
+
+    seen.add(id);
+    buildings.push({
+      id,
+      polygon,
+      height: estimateBuildingHeight(tags),
+    });
+  }
+
+  for (const way of ways.values()) {
+    if (way.tags?.building) {
+      addWayAsBuilding(way);
+    }
+  }
+
+  for (const relation of overpassData?.elements ?? []) {
+    if (relation.type !== "relation" || !relation.tags?.building) {
+      continue;
+    }
+
+    for (const member of relation.members ?? []) {
+      if (member.type === "way" && (!member.role || member.role === "outer")) {
+        const way = ways.get(member.ref);
+        if (way) {
+          addWayAsBuilding(
+            way,
+            relation.tags,
+            `relation-${relation.id}-way-${member.ref}`,
+          );
+        }
+      }
+    }
+  }
+
+  return buildings;
+}
+
+function nearestVertexDistanceMeters(point, polygon) {
+  let nearest = Infinity;
+
+  for (const vertex of polygon) {
+    const distance = haversineMeters(point, { lat: vertex[0], lng: vertex[1] });
+
+    if (distance < nearest) {
+      nearest = distance;
+    }
+  }
+
+  return nearest;
+}
+
+function attachNearbyBuildings(cafes, buildings) {
+  cafes.forEach((cafe) => {
+    const position = getPlacePosition(cafe);
+
+    if (!position) {
+      cafe.nearbyBuildings = [];
+      return;
+    }
+
+    cafe.nearbyBuildings = buildings.filter(
+      (building) => nearestVertexDistanceMeters(position, building.polygon) <= 80,
+    );
+  });
+}
+
+function translatePointByMeters(point, eastMeters, northMeters) {
+  const lat = point[0];
+  const lng = point[1];
+  const latOffset = northMeters / 111000;
+  const lngOffset = eastMeters / (111000 * Math.cos(degreesToRadians(lat)));
+
+  return [lat + latOffset, lng + lngOffset];
+}
+
+function projectShadowPolygon(building, sunData) {
+  const altitudeRadians = degreesToRadians(Math.max(sunData.altitude, 0.1));
+  const shadowLength = Math.min(
+    180,
+    building.height / Math.tan(altitudeRadians),
+  );
+  const shadowDirection = normalizeDegrees(sunData.azimuth + 180);
+  const shadowDirectionRadians = degreesToRadians(shadowDirection);
+  const eastMeters = shadowLength * Math.sin(shadowDirectionRadians);
+  const northMeters = shadowLength * Math.cos(shadowDirectionRadians);
+  const projected = building.polygon.map((point) =>
+    translatePointByMeters(point, eastMeters, northMeters),
+  );
+
+  return [...building.polygon, ...projected.reverse()];
+}
+
+function pointInPolygon(point, polygon) {
+  const x = point.lng;
+  const y = point.lat;
+  let inside = false;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i) {
+    const xi = polygon[i][1];
+    const yi = polygon[i][0];
+    const xj = polygon[j][1];
+    const yj = polygon[j][0];
+    const intersects =
+      yi > y !== yj > y &&
+      x < ((xj - xi) * (y - yi)) / (yj - yi || Number.EPSILON) + xi;
+
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+function isCafeInBuildingShadow(cafe, sunData) {
+  const position = getPlacePosition(cafe);
+
+  if (!position) {
+    return false;
+  }
+
+  for (const building of cafe.nearbyBuildings ?? []) {
+    const shadowPolygon = projectShadowPolygon(building, sunData);
+
+    if (pointInPolygon(position, shadowPolygon)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function precomputeShadowScores(cafes) {
+  console.time("Shadow pre-compute");
+  const started = performance.now();
+
+  for (const cafe of cafes) {
+    cafe.precomputedScores = {};
+  }
+
+  for (let hour = START_HOUR; hour <= END_HOUR; hour += 1) {
+    const sunData = getSunDataAt(hour);
+
+    for (const cafe of cafes) {
+      let score;
+
+      if (sunData.altitude < 5) {
+        score = 0;
+      } else {
+        score = isCafeInBuildingShadow(cafe, sunData) ? 20 : 90;
+      }
+
+      cafe.precomputedScores[hour] = applyOutdoorSeatingBonus(cafe, score);
+    }
+  }
+
+  console.timeEnd("Shadow pre-compute");
+  buildingStats.precomputeMs = Math.round(performance.now() - started);
+  usingShadowApproximation = true;
+  buildingStats.status = "ready";
+  console.info(
+    `Shadow pre-compute complete: ${cafes.length} cafes × ${
+      END_HOUR - START_HOUR + 1
+    } hours`,
+  );
+}
+
+function applyFallbackScores(cafes) {
+  for (const cafe of cafes) {
+    cafe.nearbyBuildings = [];
+    cafe.precomputedScores = {};
+
+    for (let hour = START_HOUR; hour <= END_HOUR; hour += 1) {
+      cafe.precomputedScores[hour] = calculateFallbackScore(cafe, hour);
+    }
+  }
+
+  usingShadowApproximation = false;
+}
+
+function getMarkerIconForScore(score) {
+  if (score >= 70) {
+    return markerIcons.yellow;
+  }
+
+  if (score >= 40) {
+    return markerIcons.amber;
+  }
+
+  return markerIcons.gray;
+}
+
+function getScoreTone(score) {
+  if (score >= 70) {
+    return "yellow";
+  }
+
+  if (score >= 40) {
+    return "amber";
+  }
+
+  return "gray";
+}
+
+function setStatus(message, tone = "neutral") {
+  mapStatus.textContent = message;
+  mapStatus.dataset.tone = tone;
+}
+
+function setCafeStatus(message, tone = "neutral") {
+  cafeStatusText.textContent = message;
+  cafeStatusText.parentElement.dataset.tone = tone;
+}
+
+function updateSunStatus(sunData) {
+  setStatus(
+    `Sun at ${formatHour(Number(timeSlider.value))} — azimuth ${Math.round(
+      sunData.azimuth,
+    )}°, altitude ${Math.round(sunData.altitude)}°`,
+    "ready",
+  );
+}
+
+function applySunScores() {
+  if (!loadedCafes.length || !cafeMarkers.length) {
+    return null;
+  }
+
+  const sunData = getSunDataAt(Number(timeSlider.value));
+
+  cafeMarkers.forEach((marker, index) => {
+    const cafe = loadedCafes[index];
+    const score = calculateSunScore(cafe, sunData);
+    marker.setIcon(getMarkerIconForScore(score));
+  });
+
+  updateSunStatus(sunData);
+
+  if (selectedCafe) {
+    renderDetailPanel(selectedCafe, selectedCafeIndex);
+  }
+
+  return sunData;
+}
+
+function loadGoogleMaps() {
+  return new Promise((resolve, reject) => {
+    if (window.google?.maps) {
+      resolve(window.google.maps);
+      return;
+    }
+
+    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
+    if (!apiKey) {
+      reject(new Error("Missing VITE_GOOGLE_MAPS_API_KEY"));
+      return;
+    }
+
+    window.__sunnyGoogleMapsReady = () => resolve(window.google.maps);
+
+    const script = document.createElement("script");
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&v=weekly&language=tr&loading=async&callback=__sunnyGoogleMapsReady`;
+    script.async = true;
+    script.onerror = () => reject(new Error("Google Maps failed to load"));
+    document.head.appendChild(script);
+  });
+}
+
+function createMarkerIcon(maps, color, options = {}) {
+  const size = options.size ?? 30;
+  const radius = options.radius ?? 13;
+  const stroke = options.stroke ?? "#eef2f7";
+  const strokeWidth = options.strokeWidth ?? 2.6;
+  const ring = options.ring
+    ? `<circle cx="20" cy="20" r="17" fill="none" stroke="${options.ring}" stroke-opacity="0.86" stroke-width="3"/>`
+    : "";
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">
+      <defs>
+        <filter id="shadow" x="-60%" y="-60%" width="220%" height="220%">
+          <feDropShadow dx="0" dy="5" stdDeviation="4" flood-color="#050505" flood-opacity="0.45"/>
+        </filter>
+      </defs>
+      ${ring}
+      <circle cx="20" cy="20" r="${radius}" fill="${color}" stroke="${stroke}" stroke-opacity="0.92" stroke-width="${strokeWidth}" filter="url(#shadow)"/>
+      <circle cx="16" cy="15" r="3.2" fill="rgba(255,255,255,0.38)"/>
+    </svg>
+  `;
+
+  return {
+    url: `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`,
+    scaledSize: new maps.Size(size, size),
+    anchor: new maps.Point(size / 2, size / 2),
+  };
+}
+
+function createMarkerIcons(maps) {
+  markerIcons.yellow = createMarkerIcon(maps, "#fbbf24");
+  markerIcons.amber = createMarkerIcon(maps, "#f59e0b");
+  markerIcons.gray = createMarkerIcon(maps, "#6b7280");
+  markerIcons.recommended = createMarkerIcon(maps, "#f59e0b", {
+    size: 42,
+    radius: 12,
+    stroke: "#ffffff",
+    strokeWidth: 3,
+    ring: "#fff7d6",
+  });
+}
+
+function getCachedJson(key) {
+  const cached = localStorage.getItem(key);
+
+  if (!cached) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(cached);
+  } catch (error) {
+    console.warn(`Ignoring unreadable cache for ${key}`, error);
+    localStorage.removeItem(key);
+    return null;
+  }
+}
+
+async function fetchPlaces() {
+  const cached = getCachedJson(PLACES_CACHE_KEY);
+
+  if (cached?.places) {
+    return cached;
+  }
+
+  setCafeStatus("Loading cafes...");
+
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+  const response = await fetch(PLACES_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask": PLACES_FIELD_MASK,
+    },
+    body: JSON.stringify({
+      includedTypes: ["cafe"],
+      maxResultCount: 20,
+      locationRestriction: {
+        circle: {
+          center: {
+            latitude: CIHANGIR.lat,
+            longitude: CIHANGIR.lng,
+          },
+          radius: 600,
+        },
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error("Places API failed", {
+      status: response.status,
+      statusText: response.statusText,
+      body: errorBody,
+    });
+    throw new Error(`Places API error ${response.status}`);
+  }
+
+  const data = await response.json();
+  localStorage.setItem(PLACES_CACHE_KEY, JSON.stringify(data));
+  return data;
+}
+
+async function fetchWeather() {
+  const cached = getCachedJson(WEATHER_CACHE_KEY);
+
+  if (cached?.current) {
+    currentWeather = cached.current;
+    updateHeroChip();
+    renderOpenPanelIfNeeded();
+    return currentWeather;
+  }
+
+  try {
+    const response = await fetch(WEATHER_URL);
+
+    if (!response.ok) {
+      throw new Error(`Weather API error ${response.status}`);
+    }
+
+    const data = await response.json();
+    localStorage.setItem(WEATHER_CACHE_KEY, JSON.stringify(data));
+    currentWeather = data.current;
+    updateHeroChip();
+    renderOpenPanelIfNeeded();
+    return currentWeather;
+  } catch (error) {
+    console.error("Weather loading failed", error);
+    currentWeather = null;
+    updateHeroChip();
+    renderOpenPanelIfNeeded();
+    return null;
+  }
+}
+
+function updateHeroChip() {
+  if (loadedCafes.length && currentWeather) {
+    setCafeStatus(
+      `Sunside · ${loadedCafes.length} cafes · ${Math.round(
+        currentWeather.temperature_2m,
+      )}°C`,
+      "ready",
+    );
+    return;
+  }
+
+  if (loadedCafes.length) {
+    setCafeStatus(`Sunside · ${loadedCafes.length} cafes`, "ready");
+    return;
+  }
+
+  if (currentWeather) {
+    setCafeStatus(`Sunside · ${Math.round(currentWeather.temperature_2m)}°C`);
+    return;
+  }
+
+  setCafeStatus("Loading cafes...");
+}
+
+function getPlacePosition(place) {
+  const latitude = place.location?.latitude ?? place.location?.lat;
+  const longitude = place.location?.longitude ?? place.location?.lng;
+
+  if (typeof latitude !== "number" || typeof longitude !== "number") {
+    return null;
+  }
+
+  return { lat: latitude, lng: longitude };
+}
+
+function getPlaceName(place) {
+  return place.displayName?.text ?? "Cihangir cafe";
+}
+
+function formatWeatherChip(weather) {
+  return `${Math.round(weather.temperature_2m)}°C · ${Math.round(
+    weather.wind_speed_10m,
+  )} km/h wind`;
+}
+
+function formatWeatherTemperature(weather) {
+  if (!weather) {
+    return "Weather unavailable";
+  }
+
+  return `${Math.round(weather.temperature_2m)}°C · feels like ${Math.round(
+    weather.apparent_temperature,
+  )}°C`;
+}
+
+function formatWeatherWind(weather) {
+  if (!weather) {
+    return "Wind unavailable";
+  }
+
+  return `${Math.round(weather.wind_speed_10m)} km/h ${getCompassDirection(
+    weather.wind_direction_10m,
+  )}`;
+}
+
+function buildCafesContext() {
+  const sunData = getSunDataAt(Number(timeSlider.value));
+
+  return loadedCafes.map((cafe) => ({
+    name: getPlaceName(cafe),
+    sunScore: calculateSunScore(cafe, sunData),
+    outdoorSeating:
+      cafe.outdoorSeating === true
+        ? "yes"
+        : cafe.outdoorSeating === false
+          ? "no"
+          : "unknown",
+    rating: typeof cafe.rating === "number" ? cafe.rating : null,
+    address: cafe.formattedAddress ?? "Address unavailable",
+  }));
+}
+
+function buildChatSystemPrompt() {
+  const sunData = getSunDataAt(Number(timeSlider.value));
+  const weather = currentWeather ?? {};
+  const windDirection =
+    typeof weather.wind_direction_10m === "number"
+      ? getCompassDirection(weather.wind_direction_10m)
+      : "unknown";
+  const cafesJSON = JSON.stringify(buildCafesContext(), null, 2);
+
+  return `You are Sunside, a witty assistant helping people find cafes in Cihangir, Istanbul that are currently in the sun. You know:
+
+- The current local time and date in Istanbul: ${new Date().toLocaleString("tr-TR", {
+    timeZone: "Europe/Istanbul",
+  })}
+- The current sun position: azimuth ${Math.round(sunData.azimuth)}°, altitude ${Math.round(
+    sunData.altitude,
+  )}°
+- The current Cihangir weather: ${
+    typeof weather.temperature_2m === "number"
+      ? Math.round(weather.temperature_2m)
+      : "unknown"
+  }°C, feels like ${
+    typeof weather.apparent_temperature === "number"
+      ? Math.round(weather.apparent_temperature)
+      : "unknown"
+  }°C, wind ${
+    typeof weather.wind_speed_10m === "number"
+      ? Math.round(weather.wind_speed_10m)
+      : "unknown"
+  } km/h from ${windDirection}
+- The full list of 20 cafes with their current sun score, outdoor seating status, rating, and address:
+
+${cafesJSON}
+
+When users ask for recommendations, prefer cafes with higher sun scores and outdoor seating when relevant. Be conversational and brief — 2-4 sentences usually. Mention specific cafe names. If asked about something you don't know (like menu, hours beyond what's given), say so honestly. Respond in the user's language (Turkish or English).`;
+}
+
+function toggleChat(open = !chatPanel.classList.contains("is-open")) {
+  chatPanel.classList.toggle("is-open", open);
+  chatPanel.setAttribute("aria-hidden", String(!open));
+
+  if (open) {
+    chatInput.focus();
+  }
+}
+
+function appendChatBubble(text, type = "assistant") {
+  const bubble = document.createElement("div");
+  bubble.className = `chat-bubble ${type}`;
+  bubble.textContent = text;
+  chatMessages.appendChild(bubble);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return bubble;
+}
+
+function autoGrowChatInput() {
+  chatInput.style.height = "auto";
+  chatInput.style.height = `${Math.min(chatInput.scrollHeight, 92)}px`;
+}
+
+function normalizeForMatch(value) {
+  return value
+    .toLocaleLowerCase("tr-TR")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9ğüşöçıİ\s]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getMentionedCafeIndexes(text) {
+  const normalizedText = normalizeForMatch(text);
+  const matches = [];
+
+  loadedCafes.forEach((cafe, index) => {
+    const name = getPlaceName(cafe);
+    const normalizedName = normalizeForMatch(name);
+    const usefulTokens = normalizedName
+      .split(" ")
+      .filter((token) => token.length >= 4);
+
+    if (
+      normalizedText.includes(normalizedName) ||
+      usefulTokens.some((token) => normalizedText.includes(token))
+    ) {
+      matches.push(index);
+    }
+  });
+
+  return [...new Set(matches)].slice(0, 5);
+}
+
+function showCafeRecommendations(answerText) {
+  const indexes = getMentionedCafeIndexes(answerText);
+
+  if (!indexes.length || !sunnyMap || !googleMapsApi) {
+    return;
+  }
+
+  applySunScores();
+
+  const bounds = new googleMapsApi.LatLngBounds();
+  indexes.forEach((index) => {
+    const marker = cafeMarkers[index];
+    const cafe = loadedCafes[index];
+    const position = getPlacePosition(cafe);
+
+    if (!marker || !position) {
+      return;
+    }
+
+    marker.setIcon(markerIcons.recommended);
+    marker.setZIndex(googleMapsApi.Marker.MAX_ZINDEX + index + 1);
+    bounds.extend(position);
+  });
+
+  const firstIndex = indexes[0];
+  const firstCafe = loadedCafes[firstIndex];
+
+  if (indexes.length === 1) {
+    sunnyMap.panTo(getPlacePosition(firstCafe));
+    sunnyMap.setZoom(Math.max(sunnyMap.getZoom(), 16));
+  } else {
+    sunnyMap.fitBounds(bounds, 80);
+  }
+
+  openDetailPanel(firstCafe, firstIndex);
+  setStatus(`Showing ${indexes.length} Sunside recommendation${indexes.length > 1 ? "s" : ""}`, "ready");
+}
+
+async function askClaude(message) {
+  const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    appendChatBubble("API key issue — check console for details", "error");
+    console.error("Missing VITE_ANTHROPIC_API_KEY");
+    return;
+  }
+
+  const typing = appendChatBubble("...", "assistant");
+  chatSend.disabled = true;
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        max_tokens: 600,
+        system: buildChatSystemPrompt(),
+        messages: [{ role: "user", content: message }],
+      }),
+    });
+
+    const data = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      console.error("Claude API error", {
+        status: response.status,
+        statusText: response.statusText,
+        body: data,
+      });
+      typing.className = "chat-bubble error";
+      typing.textContent =
+        response.status === 401 || response.status === 403
+          ? "API key issue — check console for details"
+          : "Hmm, couldn't reach Claude. Try again.";
+      return;
+    }
+
+    const answer = data?.content?.[0]?.text ?? "I got an empty response. Try again.";
+    typing.textContent = answer;
+    showCafeRecommendations(answer);
+  } catch (error) {
+    console.error("Claude request failed", error);
+    typing.className = "chat-bubble error";
+    typing.textContent = "Hmm, couldn't reach Claude. Try again.";
+  } finally {
+    chatSend.disabled = false;
+  }
+}
+
+function getUserLocation() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      resolve(TAKSIM);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        resolve({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+        });
+      },
+      () => resolve(TAKSIM),
+      {
+        enableHighAccuracy: false,
+        timeout: 5000,
+        maximumAge: 300000,
+      },
+    );
+  });
+}
+
+function haversineMeters(from, to) {
+  const earthRadiusMeters = 6371000;
+  const lat1 = degreesToRadians(from.lat);
+  const lat2 = degreesToRadians(to.lat);
+  const deltaLat = degreesToRadians(to.lat - from.lat);
+  const deltaLng = degreesToRadians(to.lng - from.lng);
+  const a =
+    Math.sin(deltaLat / 2) * Math.sin(deltaLat / 2) +
+    Math.cos(lat1) *
+      Math.cos(lat2) *
+      Math.sin(deltaLng / 2) *
+      Math.sin(deltaLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusMeters * c;
+}
+
+function degreesToRadians(degrees) {
+  return (degrees * Math.PI) / 180;
+}
+
+function formatWalkingDistance(cafe) {
+  const position = getPlacePosition(cafe);
+
+  if (!position) {
+    return "Distance unavailable";
+  }
+
+  const meters = Math.round(
+    haversineMeters(userPosition, position) * WALKING_FACTOR,
+  );
+  const minutes = Math.max(1, Math.round(meters / WALKING_METERS_PER_MINUTE));
+  return `${meters}m walk · ~${minutes} min`;
+}
+
+function formatOutdoorSeating(cafe) {
+  if (cafe.outdoorSeating === true) {
+    return { text: "✓ Yes", tone: "yes" };
+  }
+
+  if (cafe.outdoorSeating === false) {
+    return { text: "✗ No", tone: "no" };
+  }
+
+  return { text: "— Unknown", tone: "unknown" };
+}
+
+function extractSolarSummary(data) {
+  const potential = data?.solarPotential;
+
+  if (!potential) {
+    return null;
+  }
+
+  const maxSunshineHoursPerYear = potential.maxSunshineHoursPerYear;
+  const sunshineCandidates = [
+    maxSunshineHoursPerYear,
+    potential.maxSunshineHoursPerYear,
+    ...(potential.roofSegmentStats ?? []).map(
+      (segment) => segment?.stats?.sunshineQuantiles?.[5],
+    ),
+    ...(potential.roofSegmentStats ?? []).map(
+      (segment) => segment?.stats?.sunshineQuantiles?.at?.(-1),
+    ),
+  ].filter((value) => typeof value === "number" && Number.isFinite(value));
+
+  const sunshineHours = sunshineCandidates.length
+    ? Math.max(...sunshineCandidates)
+    : null;
+  const roofArea = potential.wholeRoofStats?.areaMeters2 ?? null;
+
+  if (!sunshineHours && !roofArea) {
+    return null;
+  }
+
+  return { sunshineHours, maxSunshineHoursPerYear, roofArea };
+}
+
+function getSolarCacheKey(cafe) {
+  return `${SOLAR_CACHE_PREFIX}${cafe.id}`;
+}
+
+function getSolarState(cafe) {
+  if (!cafe?.id) {
+    return { status: "failed", summary: null };
+  }
+
+  if (solarByPlaceId.has(cafe.id)) {
+    return { status: "ready", summary: solarByPlaceId.get(cafe.id) };
+  }
+
+  if (solarFailures.has(cafe.id)) {
+    return { status: "failed", summary: null };
+  }
+
+  if (solarPending.has(cafe.id)) {
+    return { status: "loading", summary: null };
+  }
+
+  return { status: "loading", summary: null };
+}
+
+function renderSolarState(cafe) {
+  const state = getSolarState(cafe);
+  const hasAnnualSunshine =
+    state.status === "ready" &&
+    typeof state.summary?.maxSunshineHoursPerYear === "number";
+
+  panelSolarDivider.hidden = !hasAnnualSunshine;
+  panelSolarSection.hidden = !hasAnnualSunshine;
+
+  if (!hasAnnualSunshine) {
+    panelSolar.className = "solar-card";
+    panelSolar.innerHTML = "";
+    return;
+  }
+
+  const hours = `${Math.round(
+    state.summary.maxSunshineHoursPerYear,
+  ).toLocaleString()} sunshine hours/year`;
+  const roof = state.summary.roofArea
+    ? `<span>${Math.round(state.summary.roofArea).toLocaleString()} m² roof area</span>`
+    : "";
+
+  panelSolar.className = "solar-card is-ready";
+  panelSolar.innerHTML = `
+    <strong>☀ ${hours}</strong>
+    ${roof}
+    <small>Source: Google Solar API</small>
+  `;
+}
+
+function renderDetailPanel(cafe, index) {
+  const sunData = getSunDataAt(Number(timeSlider.value));
+  const score = calculateSunScore(cafe, sunData);
+  const tone = getScoreTone(score);
+  const outdoor = formatOutdoorSeating(cafe);
+
+  panelName.textContent = getPlaceName(cafe);
+  panelAddress.textContent = cafe.formattedAddress ?? "Address unavailable";
+
+  if (typeof cafe.rating === "number") {
+    panelRating.hidden = false;
+    panelRating.textContent = `★ ${cafe.rating.toFixed(1)}`;
+  } else {
+    panelRating.hidden = true;
+    panelRating.textContent = "";
+  }
+
+  panelScore.textContent = `${score}/100`;
+  panelScoreFill.style.width = `${score}%`;
+  panelScoreFill.dataset.tone = tone;
+  panelSunLine.textContent = `Sun: ${getCompassDirection(
+    sunData.azimuth,
+  )} · altitude ${Math.round(sunData.altitude)}°`;
+  panelOutdoor.textContent = outdoor.text;
+  panelOutdoor.dataset.tone = outdoor.tone;
+  panelDistance.textContent = formatWalkingDistance(cafe);
+  panelTemperature.textContent = formatWeatherTemperature(currentWeather);
+  panelWind.textContent = formatWeatherWind(currentWeather);
+  renderSolarState(cafe);
+
+  selectedCafe = cafe;
+  selectedCafeIndex = index;
+}
+
+function openDetailPanel(cafe, index) {
+  renderDetailPanel(cafe, index);
+  detailPanel.classList.add("is-open");
+  detailPanel.setAttribute("aria-hidden", "false");
+}
+
+function closeDetailPanel() {
+  detailPanel.classList.remove("is-open");
+  detailPanel.setAttribute("aria-hidden", "true");
+}
+
+function renderOpenPanelIfNeeded() {
+  if (selectedCafe) {
+    renderDetailPanel(selectedCafe, selectedCafeIndex);
+  }
+}
+
+function renderCafeMarkers(maps, map, cafes) {
+  cafeMarkers.forEach((marker) => marker.setMap(null));
+  cafeMarkers.length = 0;
+  loadedCafes = cafes;
+
+  cafes.forEach((cafe, index) => {
+    const position = getPlacePosition(cafe);
+
+    if (!position) {
+      console.warn("Skipping cafe without coordinates", cafe);
+      return;
+    }
+
+    const marker = new maps.Marker({
+      map,
+      position,
+      title: getPlaceName(cafe),
+      icon: markerIcons.yellow,
+      optimized: true,
+    });
+
+    marker.addListener("click", () => {
+      console.log("Sunside cafe marker clicked", cafe);
+      openDetailPanel(cafe, index);
+    });
+
+    cafeMarkers.push(marker);
+  });
+
+  window.__sunnyPhase2 = {
+    cafes,
+    markers: cafeMarkers,
+  };
+
+  applySunScores();
+  exposeDebugHandles();
+}
+
+function drawBuildingOverlay(maps, map, buildings) {
+  void maps;
+  void map;
+  void buildings;
+  buildingStats.overlayCount = 0;
+}
+
+async function loadBuildingShadowModel(cafes, maps, map) {
+  if (!ENABLE_SHADOWS) {
+    applyFallbackScores(cafes);
+    applySunScores();
+    exposeDebugHandles();
+    return;
+  }
+
+  try {
+    buildingStats.status = "loading";
+    setCafeStatus("Loading building data...", "ready");
+    const overpassData = await fetchBuildingData();
+    const buildings = parseBuildingPolygons(overpassData);
+    buildingStats.count = buildings.length;
+    attachNearbyBuildings(cafes, buildings);
+    precomputeShadowScores(cafes);
+    drawBuildingOverlay(maps, map, buildings);
+    applySunScores();
+    updateHeroChip();
+    exposeDebugHandles();
+    console.info(`Overpass buildings parsed: ${buildings.length}`);
+  } catch (error) {
+    console.warn(
+      "Building shadow approximation unavailable; falling back to SunCalc-only scoring.",
+      error,
+    );
+    buildingStats.count = 0;
+    buildingStats.precomputeMs = 0;
+    buildingStats.status = "fallback";
+    applyFallbackScores(cafes);
+    applySunScores();
+    updateHeroChip();
+    exposeDebugHandles();
+  }
+}
+
+async function loadCafes(maps, map) {
+  try {
+    setCafeStatus("Loading cafes...");
+    const data = await fetchPlaces();
+    const cafes = data.places ?? [];
+    renderCafeMarkers(maps, map, cafes);
+    updateHeroChip();
+    console.info("Sunside Places response", data);
+    if (ENABLE_SHADOWS) {
+      await loadBuildingShadowModel(cafes, maps, map);
+    }
+    startSolarFetches(cafes);
+  } catch (error) {
+    console.error("Cafe loading failed", error);
+    setCafeStatus("Cafe loading failed", "error");
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchSolarForCafe(cafe) {
+  const position = getPlacePosition(cafe);
+
+  if (!position || !cafe.id) {
+    throw new Error("Cafe missing coordinates or id");
+  }
+
+  const cached = getCachedJson(getSolarCacheKey(cafe));
+
+  if (cached?.summary) {
+    solarByPlaceId.set(cafe.id, cached.summary);
+    return cached.summary;
+  }
+
+  if (cached?.status === "failed") {
+    solarFailures.set(cafe.id, cached);
+    throw new Error(cached.reason ?? "Cached Solar miss");
+  }
+
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+  const url = new URL(
+    "https://solar.googleapis.com/v1/buildingInsights:findClosest",
+  );
+  url.searchParams.set("location.latitude", String(position.lat));
+  url.searchParams.set("location.longitude", String(position.lng));
+  url.searchParams.set("requiredQuality", "LOW");
+  url.searchParams.set("key", apiKey);
+
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    const body = await response.text();
+    console.info("Solar API unavailable for cafe", {
+      cafe: getPlaceName(cafe),
+      status: response.status,
+      body,
+    });
+    throw new Error(`Solar API error ${response.status}`);
+  }
+
+  const data = await response.json();
+  const summary = extractSolarSummary(data);
+
+  if (!summary) {
+    throw new Error("Solar response missing usable sunshine fields");
+  }
+
+  localStorage.setItem(
+    getSolarCacheKey(cafe),
+    JSON.stringify({ status: "ready", summary, raw: data }),
+  );
+  solarByPlaceId.set(cafe.id, summary);
+  return summary;
+}
+
+async function startSolarFetches(cafes) {
+  solarProgress = {
+    total: cafes.length,
+    completed: 0,
+    success: 0,
+    failed: 0,
+    done: false,
+  };
+  updateHeroChip();
+
+  for (const cafe of cafes) {
+    if (!cafe.id) {
+      solarProgress.completed += 1;
+      solarProgress.failed += 1;
+      continue;
+    }
+
+    solarPending.add(cafe.id);
+    renderOpenPanelIfNeeded();
+
+    try {
+      await fetchSolarForCafe(cafe);
+      solarProgress.success += 1;
+    } catch (error) {
+      solarFailures.set(cafe.id, error);
+      localStorage.setItem(
+        getSolarCacheKey(cafe),
+        JSON.stringify({ status: "failed", reason: error.message }),
+      );
+      solarProgress.failed += 1;
+    } finally {
+      solarPending.delete(cafe.id);
+      solarProgress.completed += 1;
+      updateHeroChip();
+      renderOpenPanelIfNeeded();
+    }
+
+    await sleep(200);
+  }
+
+  solarProgress.done = true;
+  updateHeroChip();
+  exposeDebugHandles();
+}
+
+function exposeDebugHandles() {
+  window.__sunnyPhase3 = {
+    cafes: loadedCafes,
+    markers: cafeMarkers,
+    getSunDataAt,
+    calculateSunScore,
+    getMarkerIconForScore,
+    applySunScores,
+    getBucketCountsAt(hour) {
+      const sunData = getSunDataAt(hour);
+      const counts = { yellow: 0, amber: 0, gray: 0 };
+
+      loadedCafes.forEach((cafe) => {
+        const score = calculateSunScore(cafe, sunData);
+
+        if (score >= 70) {
+          counts.yellow += 1;
+        } else if (score >= 40) {
+          counts.amber += 1;
+        } else {
+          counts.gray += 1;
+        }
+      });
+
+      return { hour, sunData, counts };
+    },
+  };
+
+  window.__sunnyPhase5 = {
+    get weather() {
+      return currentWeather;
+    },
+    get userPosition() {
+      return userPosition;
+    },
+    get selectedCafe() {
+      return selectedCafe;
+    },
+    get solarProgress() {
+      return solarProgress;
+    },
+    get solarSuccesses() {
+      return Array.from(solarByPlaceId.entries());
+    },
+    get solarFailures() {
+      return Array.from(solarFailures.keys());
+    },
+    get buildingStats() {
+      return buildingStats;
+    },
+    get usingShadowApproximation() {
+      return usingShadowApproximation;
+    },
+    getScoresAt(hour) {
+      return loadedCafes.map((cafe) => ({
+        name: getPlaceName(cafe),
+        position: getPlacePosition(cafe),
+        score: calculateSunScore(cafe, getSunDataAt(hour)),
+        nearbyBuildings: cafe.nearbyBuildings?.length ?? 0,
+      }));
+    },
+    openFirstCafe() {
+      if (loadedCafes[0]) {
+        openDetailPanel(loadedCafes[0], 0);
+      }
+    },
+  };
+}
+
+async function initMap() {
+  console.info(
+    "Solar API integrated but Cihangir has no coverage — using SunCalc-only scoring for demo stability.",
+  );
+  console.info(
+    "OSM building shadow approximation is implemented but disabled for demo stability.",
+  );
+  fetchWeather();
+  getUserLocation().then((position) => {
+    userPosition = position;
+    renderOpenPanelIfNeeded();
+  });
+
+  try {
+    const maps = await loadGoogleMaps();
+    googleMapsApi = maps;
+    createMarkerIcons(maps);
+
+    const map = new maps.Map(document.querySelector("#map"), {
+      center: CIHANGIR,
+      zoom: 16,
+      disableDefaultUI: true,
+      clickableIcons: false,
+      gestureHandling: "greedy",
+      backgroundColor: "#0d0c0a",
+      styles: mapStyles,
+    });
+    sunnyMap = map;
+
+    new maps.Circle({
+      map,
+      center: CIHANGIR,
+      radius: 600,
+      strokeColor: "#f6b73c",
+      strokeOpacity: 0.28,
+      strokeWeight: 1,
+      fillColor: "#f6b73c",
+      fillOpacity: 0.035,
+    });
+
+    setStatus("Loading cafes...", "ready");
+    await loadCafes(maps, map);
+  } catch (error) {
+    setStatus(error.message, "error");
+  }
+}
+
+timeSlider.value = clampHour(DEFAULT_HOUR);
+syncTimeLabel();
+timeSlider.addEventListener("input", () => {
+  syncTimeLabel();
+  applySunScores();
+});
+panelClose.addEventListener("click", closeDetailPanel);
+chatFab.addEventListener("click", () => toggleChat());
+chatClose.addEventListener("click", () => toggleChat(false));
+chatInput.addEventListener("input", autoGrowChatInput);
+chatInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    chatForm.requestSubmit();
+  }
+});
+chatForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const message = chatInput.value.trim();
+
+  if (!message || chatSend.disabled) {
+    return;
+  }
+
+  appendChatBubble(message, "user");
+  chatInput.value = "";
+  autoGrowChatInput();
+  askClaude(message);
+});
+
+initMap();

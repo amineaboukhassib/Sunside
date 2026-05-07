@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Sunside shows which Cihangir cafes are in the sun right now."
+    />
+    <title>Sunside</title>
+  </head>
+  <body>
+    <main class="sunny-shell" aria-label="Sunside cafe sun map">
+      <div id="map" class="map-canvas" aria-hidden="true"></div>
+
+      <section class="brand-panel glass-panel" aria-label="Sunside status">
+        <div class="brand-mark">
+          <span class="sun-dot" aria-hidden="true"></span>
+          <span class="brand-kicker">Cihangir live sun map</span>
+        </div>
+        <h1>Sunside</h1>
+        <p>Şu an, yakınında, güneşli.</p>
+        <div class="weather-chip" id="weather-chip">
+          <span class="chip-pulse" aria-hidden="true"></span>
+          <span id="cafe-status-text">Loading cafes...</span>
+        </div>
+        <div class="map-status" id="map-status" role="status">Loading Google Map...</div>
+      </section>
+
+      <section class="time-panel glass-panel" aria-label="Time preview control">
+        <div class="time-header">
+          <span>Time preview</span>
+          <strong id="time-label">14:00</strong>
+        </div>
+        <input
+          id="time-slider"
+          class="time-slider"
+          type="range"
+          min="6"
+          max="20"
+          step="1"
+          value="14"
+          aria-label="Preview sunny cafes by time"
+        />
+        <div class="time-scale" aria-hidden="true">
+          <span>06:00</span>
+          <span>20:00</span>
+        </div>
+      </section>
+
+      <aside
+        class="detail-panel glass-panel"
+        id="detail-panel"
+        aria-label="Cafe details"
+        aria-hidden="true"
+      >
+        <button class="panel-close" id="panel-close" type="button" aria-label="Close cafe details">
+          <span aria-hidden="true">×</span>
+        </button>
+
+        <div class="panel-content">
+          <header class="panel-head">
+            <h2 id="panel-name">Cafe name</h2>
+            <p id="panel-address">Address</p>
+            <div class="rating-row" id="panel-rating"></div>
+          </header>
+
+          <div class="panel-divider"></div>
+
+          <section class="panel-section">
+            <h3>Right now</h3>
+            <div class="score-row">
+              <strong id="panel-score">--/100</strong>
+              <span id="panel-score-label">Sun score</span>
+            </div>
+            <div class="score-bar" aria-hidden="true">
+              <span id="panel-score-fill"></span>
+            </div>
+            <dl class="detail-list">
+              <div>
+                <dt>Sun</dt>
+                <dd id="panel-sun-line">--</dd>
+              </div>
+              <div>
+                <dt>Outdoor seating</dt>
+                <dd id="panel-outdoor">Unknown</dd>
+              </div>
+              <div>
+                <dt>Walking distance</dt>
+                <dd id="panel-distance">Calculating...</dd>
+              </div>
+            </dl>
+          </section>
+
+          <div class="panel-divider"></div>
+
+          <section class="panel-section">
+            <h3>Right now in Cihangir</h3>
+            <dl class="detail-list">
+              <div>
+                <dt>Temperature</dt>
+                <dd id="panel-temperature">Loading weather...</dd>
+              </div>
+              <div>
+                <dt>Wind</dt>
+                <dd id="panel-wind">Loading wind...</dd>
+              </div>
+            </dl>
+          </section>
+
+          <div class="panel-divider solar-divider" id="panel-solar-divider" hidden></div>
+
+          <section class="panel-section solar-section" id="panel-solar-section" hidden>
+            <h3>Annual sunshine</h3>
+            <div class="solar-card" id="panel-solar">
+            </div>
+          </section>
+        </div>
+      </aside>
+
+      <div class="data-attribution" aria-label="Data attribution">
+        Sun data: SunCalc · Weather: Open-Meteo · Cafes: Google Places
+      </div>
+
+      <button class="chat-fab" id="chat-fab" type="button" aria-label="Ask Sunside">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" />
+          <path d="M18 15l.8 2.2L21 18l-2.2.8L18 21l-.8-2.2L15 18l2.2-.8L18 15z" />
+        </svg>
+      </button>
+
+      <aside class="chat-panel glass-panel" id="chat-panel" aria-label="Ask Sunside chat" aria-hidden="true">
+        <header class="chat-header">
+          <strong>Ask Sunside</strong>
+          <button class="chat-close" id="chat-close" type="button" aria-label="Close chat">×</button>
+        </header>
+        <div class="chat-messages" id="chat-messages">
+          <div class="chat-bubble assistant">
+            Hey — I know all 20 cafes in Cihangir, current sun positions, and live weather. Ask me anything.
+          </div>
+        </div>
+        <form class="chat-input-row" id="chat-form">
+          <textarea id="chat-input" rows="1" placeholder="Ask for a sunny cafe..." aria-label="Ask Sunside"></textarea>
+          <button id="chat-send" type="submit">Send</button>
+        </form>
+      </aside>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

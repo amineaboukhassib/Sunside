@@ -1,0 +1,16 @@
+.env
+env.txt
+envtxt.txt
+node_modules
+dist
+.vite
+.chrome-profile
+.chrome-click-profile
+.verify
+phase2-screenshot.png
+phase3-screenshot.png
+phase45-screenshot.png
+phase1-screenshot.png
+vite-phase1*.log
+chrome-click*.log
+claudeapi.txt
