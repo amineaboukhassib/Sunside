@@ -687,10 +687,10 @@ function createMarkerIcons() {
   markerIcons.recommended = createLeafletIcon("#f59e0b", {
     size: 42, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#fff7d6",
   });
-  // Teal icon for library markers
-  markerIcons.library = createLeafletIcon("#14b8a6", { stroke: "#ccfbf1" });
-  markerIcons.libraryRecommended = createLeafletIcon("#0d9488", {
-    size: 38, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#99f6e4",
+  // Classic Academic Blue icons for library markers
+  markerIcons.library = createLeafletIcon("#3b82f6", { stroke: "#bfdbfe" });
+  markerIcons.libraryRecommended = createLeafletIcon("#1d4ed8", {
+    size: 38, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#dbeafe",
   });
 }
 
