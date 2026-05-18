@@ -16,6 +16,7 @@ export const AREAS = [
   { id: 'Balat',       label: 'Balat',        emoji: '🎨' },
   { id: 'Eminonu',     label: 'Eminönü',      emoji: '⛵' },
   { id: 'Ortakoy',     label: 'Ortaköy',      emoji: '🌉' },
+  { id: 'Kagithane',   label: 'Kağıthane',    emoji: '🏢' },
   { id: 'Istanbul',    label: 'Other',        emoji: '📍' },
 ];
 
@@ -144,7 +145,7 @@ export function initAreaFilter(allCafes, callback) {
   container.id = 'area-filter';
   container.innerHTML = buildHTML(allCafes);
 
-  (document.querySelector('.map-overlay') || document.querySelector('#app') || document.body)
+  (document.querySelector('.sunny-shell') || document.querySelector('.map-overlay') || document.querySelector('#app') || document.body)
     .appendChild(container);
 
   renderPills(allCafes);

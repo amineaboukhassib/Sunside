@@ -4,6 +4,7 @@ import "leaflet/dist/leaflet.css";
 import "./style.css";
 import { ISTANBUL_CAFES } from "./cafes.js";
 import librariesData from "./libraries.js";
+import kagithaneData from "./kagithane.js";
 import { initAreaFilter, refreshFilterCounts, filterCafes, setUserLocation } from "./areaFilter.js";
 
 const CIHANGIR = { lat: 41.0327, lng: 28.9818 };
@@ -755,6 +756,10 @@ function mapDistrictToArea(properties) {
   const neighbourhood = (properties["addr:neighbourhood"] ?? "").toLowerCase();
   const suburb = (properties["suburb"] ?? "").toLowerCase();
 
+  if (district.includes("kağıthane") || district.includes("kagithane") || neighbourhood.includes("seyrantepe") || neighbourhood.includes("emniyetevleri") || neighbourhood.includes("gürsel")) {
+    return "Kagithane";
+  }
+
   if (district.includes("beşiktaş") || neighbourhood.includes("beşiktaş")) {
     if (neighbourhood.includes("bebek") || suburb.includes("bebek")) return "Bebek";
     if (neighbourhood.includes("arnavutköy") || suburb.includes("arnavutköy")) return "Arnavutkoy";
@@ -844,6 +849,51 @@ function adaptLibrary(feature, index) {
     tolerance:       p.tolerance ?? 90,
     openingHours:    p.opening_hours ?? p.openingHours ?? "09:00-18:00",
     placeType:       'library',
+  };
+}
+
+/**
+ * Adapts a GeoJSON cafe feature into the internal Sunside place format.
+ */
+function adaptGeoJsonCafe(feature, index) {
+  const p = feature.properties;
+  
+  // Extract coordinates
+  let lng = 0, lat = 0;
+  const geom = feature.geometry;
+  if (!geom) return null;
+
+  if (geom.type === "Point") {
+    [lng, lat] = geom.coordinates;
+  } else if (geom.type === "Polygon" && geom.coordinates[0]) {
+    const ring = geom.coordinates[0];
+    let sumLng = 0, sumLat = 0;
+    ring.forEach(coord => {
+      sumLng += coord[0];
+      sumLat += coord[1];
+    });
+    lng = sumLng / ring.length;
+    lat = sumLat / ring.length;
+  } else {
+    return null;
+  }
+
+  const area = mapDistrictToArea(p) || "Kagithane";
+  const name = p.name ?? p["name:en"] ?? p["name:tr"] ?? `Cafe #${index}`;
+
+  return {
+    id:              `cafe-geo-${index}`,
+    displayName:     { text: name },
+    location:        { latitude: lat, longitude: lng },
+    outdoorSeating:  p.outdoor_seating === "yes" || p.hasOutdoorSeating === true ? true : (p.outdoor_seating === "no" || p.hasOutdoorSeating === false ? false : true),
+    rating:          p.rating ?? null,
+    area:            area,
+    formattedAddress: getOSMAddress(p),
+    facingDegrees:   p.facingDegrees ?? 180,
+    buildingFloors:  p.buildingFloors ?? 4,
+    tolerance:       p.tolerance ?? 90,
+    openingHours:    p.opening_hours ?? p.openingHours ?? "08:00-22:00",
+    placeType:       'cafe',
   };
 }
 
@@ -1489,8 +1539,15 @@ function renderLibraryMarkers(map, libraries) {
 }
 
 function loadLibraries(map) {
-  if (!librariesData || !librariesData.features) return;
-  const libs = librariesData.features.map(adaptLibrary);
+  const staticLibs = (librariesData?.features ?? []).map(adaptLibrary);
+  
+  // Also load Kağıthane libraries!
+  const kagithaneLibs = (kagithaneData?.features ?? [])
+    .filter(f => f.properties.amenity === "library")
+    .map((f, i) => adaptLibrary(f, staticLibs.length + i));
+  
+  const libs = [...staticLibs, ...kagithaneLibs];
+
   renderLibraryMarkers(map, libs);
   console.info(`Loaded ${libs.length} libraries into Sunside`);
 }
@@ -1664,7 +1721,15 @@ async function loadCafes(map) {
   try {
     setCafeStatus("Loading cafes...");
     const data = await fetchPlaces();
-    const cafes = data.places ?? [];
+    const staticCafes = data.places ?? [];
+    
+    // Also load Kağıthane cafes!
+    const kagithaneCafes = (kagithaneData?.features ?? [])
+      .filter(f => f.properties.amenity === "cafe")
+      .map((f, i) => adaptGeoJsonCafe(f, i));
+    
+    const cafes = [...staticCafes, ...kagithaneCafes];
+
     renderCafeMarkers(map, cafes);
     updateHeroChip();
     console.info("Sunside Places response", data);
