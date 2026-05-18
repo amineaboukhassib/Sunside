@@ -789,6 +789,7 @@ p {
   }
 }
 
+
 @keyframes shimmer {
   0% {
     transform: translateX(-100%);
@@ -797,4 +798,22 @@ p {
   100% {
     transform: translateX(260%);
   }
+}
+
+/* Leaflet Custom Styling to match premium dark-glass theme */
+.custom-leaflet-tooltip {
+  border: 1px solid rgba(255, 244, 215, 0.16) !important;
+  border-radius: 999px !important;
+  background: rgba(15, 14, 11, 0.9) !important;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.42) !important;
+  backdrop-filter: blur(16px) !important;
+  padding: 0 !important;
+}
+
+.leaflet-tooltip-top:before {
+  border-top-color: rgba(15, 14, 11, 0.9) !important;
+}
+
+.leaflet-container {
+  font-family: inherit !important;
 }
