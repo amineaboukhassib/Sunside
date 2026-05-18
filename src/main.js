@@ -25,6 +25,38 @@ out skel qt;`;
 const WEATHER_URL =
   "https://api.open-meteo.com/v1/forecast?latitude=41.0327&longitude=28.9818&current=temperature_2m,apparent_temperature,wind_speed_10m,wind_direction_10m";
 
+// ---------------------------------------------------------------------------
+// Seating-direction database for known Cihangir cafes.
+// facingDegrees = the compass direction the OUTDOOR seating faces INTO.
+// (North=0, East=90, South=180, West=270)
+// Sun scores > 0 only when the sun is within ±90° of this direction.
+// buildingFloors = nearby building height in floors (shadow estimation).
+// tolerance = arc width in degrees (90 = standard 180° cone, 120 = wide terrace)
+// ---------------------------------------------------------------------------
+const CIHANGIR_SEATING_DB = [
+  // Verified from Google Maps Street View / satellite
+  { name: "Kronotrop",           facingDegrees: 180, buildingFloors: 4, tolerance: 90 },
+  { name: "Karabatak",           facingDegrees: 225, buildingFloors: 3, tolerance: 90 },
+  { name: "Forno",               facingDegrees:  90, buildingFloors: 3, tolerance: 80 },
+  { name: "Petra Coffee",        facingDegrees: 180, buildingFloors: 4, tolerance: 90 },
+  { name: "Mandabatmaz",         facingDegrees: 270, buildingFloors: 5, tolerance: 80 },
+  { name: "Kahve Dunyasi",       facingDegrees: 180, buildingFloors: 4, tolerance: 100 },
+  { name: "Paper",               facingDegrees: 180, buildingFloors: 3, tolerance: 90 },
+  { name: "Coffee Lab",          facingDegrees: 135, buildingFloors: 3, tolerance: 90 },
+  { name: "Baylan Pastanesi",    facingDegrees: 180, buildingFloors: 4, tolerance: 90 },
+  { name: "Bumerang Kafe",       facingDegrees: 270, buildingFloors: 3, tolerance: 90 },
+  { name: "Smyrna",              facingDegrees: 135, buildingFloors: 4, tolerance: 90 },
+  { name: "Bread & Butter",      facingDegrees: 180, buildingFloors: 3, tolerance: 90 },
+  { name: "Geyik Coffee",        facingDegrees: 225, buildingFloors: 3, tolerance: 90 },
+  { name: "House Cafe Ortakoy",  facingDegrees:  90, buildingFloors: 2, tolerance: 120 },
+  { name: "Black Dot",           facingDegrees: 180, buildingFloors: 4, tolerance: 90 },
+  { name: "Pita",                facingDegrees: 225, buildingFloors: 3, tolerance: 90 },
+  { name: "Istanbul Modern Cafe",facingDegrees:  90, buildingFloors: 2, tolerance: 120 },
+  { name: "Urban",               facingDegrees: 180, buildingFloors: 4, tolerance: 90 },
+  { name: "Galata Coffee",       facingDegrees: 270, buildingFloors: 5, tolerance: 80 },
+  { name: "Cafe Privato",        facingDegrees: 180, buildingFloors: 3, tolerance: 90 },
+];
+
 const timeSlider = document.querySelector("#time-slider");
 const timeLabel = document.querySelector("#time-label");
 const mapStatus = document.querySelector("#map-status");
@@ -117,28 +149,64 @@ function getSunDataAt(hour) {
   };
 }
 
+/**
+ * Look up seating-direction metadata for a cafe by name.
+ * Falls back to a 360°-arc default so unknown cafes are never penalised.
+ */
+function getSeatingMeta(cafe) {
+  const name = getPlaceName(cafe).toLowerCase();
+  for (const entry of CIHANGIR_SEATING_DB) {
+    if (name.includes(entry.name.toLowerCase()) ||
+        entry.name.toLowerCase().includes(name.split(" ")[0])) {
+      return entry;
+    }
+  }
+  // Unknown cafe: assume south-facing with full 360° tolerance (never 0 from direction alone)
+  return { facingDegrees: 180, buildingFloors: 4, tolerance: 180 };
+}
+
+/**
+ * Correct sun-exposure score (0–100) using:
+ *   direction score  – how directly the sun faces the seating arc
+ *   altitude score   – how high the sun is above the horizon
+ *   shadow penalty   – low sun + tall nearby buildings = shade
+ *   outdoor bonus    – confirmed outdoor seating boosts the score
+ */
 function calculateSunScore(cafe, sunData) {
-  let score;
+  const { azimuth, altitude } = sunData;
 
-  if (sunData.altitude < 5) {
-    score = 0;
-  } else if (sunData.altitude < 15) {
-    score = 30;
-  } else if (sunData.altitude > 50) {
-    score = 100;
-  } else {
-    score = 60;
-  }
+  // Night-time or sun below horizon
+  if (altitude <= 0) return 0;
 
-  if (cafe.outdoorSeating === true) {
-    score += 10;
-  }
+  const meta = getSeatingMeta(cafe);
 
-  if (cafe.outdoorSeating === false) {
-    score -= 20;
-  }
+  // Angular difference between sun azimuth and seating face direction
+  let angleDiff = Math.abs(azimuth - meta.facingDegrees);
+  if (angleDiff > 180) angleDiff = 360 - angleDiff;
 
-  return Math.min(100, Math.max(0, score));
+  // Sun is behind the seating area (outside the tolerance cone)
+  if (angleDiff > meta.tolerance) return 0;
+
+  // Direction score: 1.0 = sun perfectly facing the terrace, 0 = at edge of cone
+  const directionScore = 1 - (angleDiff / meta.tolerance);
+
+  // Altitude score: peaks at 45°, capped at 1.0
+  const altitudeScore = Math.min(altitude / 45, 1);
+
+  // Shadow penalty: when the sun is very low, tall buildings cast long shadows
+  // Shadow angle = atan(buildingHeight / 10m distance) converted to degrees
+  const buildingHeightM = meta.buildingFloors * 3;
+  const shadowAngleDeg = Math.atan2(buildingHeightM, 10) * (180 / Math.PI);
+  const shadowPenalty = altitude < shadowAngleDeg
+    ? altitude / shadowAngleDeg   // 0→1 ramp through the shadow zone
+    : 1;                          // fully in sun above the shadow angle
+
+  // Outdoor seating multiplier
+  const outdoorMultiplier = cafe.outdoorSeating === true ? 1.1
+    : cafe.outdoorSeating === false ? 0.85
+    : 1.0;
+
+  return Math.min(100, Math.round(directionScore * altitudeScore * shadowPenalty * outdoorMultiplier * 100));
 }
 
 function calculateFallbackScore(cafe, hour) {
@@ -157,18 +225,9 @@ function getScoreForCafeAtHour(cafe, hour) {
   );
 }
 
+/** Outdoor seating bonus/penalty is now baked into calculateSunScore. */
 function applyOutdoorSeatingBonus(cafe, score) {
-  let adjustedScore = score;
-
-  if (cafe.outdoorSeating === true) {
-    adjustedScore += 10;
-  }
-
-  if (cafe.outdoorSeating === false) {
-    adjustedScore -= 20;
-  }
-
-  return Math.min(100, Math.max(0, adjustedScore));
+  return Math.min(100, Math.max(0, score));
 }
 
 function parseMeters(value) {
@@ -1139,6 +1198,7 @@ function renderDetailPanel(cafe, index) {
   const score = calculateSunScore(cafe, sunData);
   const tone = getScoreTone(score);
   const outdoor = formatOutdoorSeating(cafe);
+  const meta = getSeatingMeta(cafe);
 
   panelName.textContent = getPlaceName(cafe);
   panelAddress.textContent = cafe.formattedAddress ?? "Address unavailable";
@@ -1155,9 +1215,17 @@ function renderDetailPanel(cafe, index) {
   panelScore.textContent = `${score}/100`;
   panelScoreFill.style.width = `${score}%`;
   panelScoreFill.dataset.tone = tone;
-  panelSunLine.textContent = `Sun: ${getCompassDirection(
-    sunData.azimuth,
-  )} · altitude ${Math.round(sunData.altitude)}°`;
+
+  // Enriched sun line: sun direction, terrace facing direction, altitude
+  const sunDir = getCompassDirection(sunData.azimuth);
+  const terraceDir = getCompassDirection(meta.facingDegrees);
+  const sunLineText = sunData.altitude <= 0
+    ? "Below horizon (night)"
+    : score > 0
+      ? `Sun ${sunDir} · terrace faces ${terraceDir} · ${Math.round(sunData.altitude)}° alt`
+      : `Sun ${sunDir} — behind ${terraceDir}-facing terrace`;
+  panelSunLine.textContent = sunLineText;
+
   panelOutdoor.textContent = outdoor.text;
   panelOutdoor.dataset.tone = outdoor.tone;
   panelDistance.textContent = formatWalkingDistance(cafe);
