@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./style.css";
 import { ISTANBUL_CAFES } from "./cafes.js";
+import { initAreaFilter, refreshFilterCounts, filterCafes, setUserLocation } from "./areaFilter.js";
 
 const CIHANGIR = { lat: 41.0327, lng: 28.9818 };
 const TAKSIM = { lat: 41.0369, lng: 28.985 };
@@ -582,9 +583,13 @@ function applySunScores() {
   cafeMarkers.forEach((marker, index) => {
     const cafe = loadedCafes[index];
     const score = calculateSunScore(cafe, sunData);
+    cafe.sunScore = score; // attach for area filter badge counts
     marker.setIcon(getMarkerIconForScore(score));
     marker.setZIndexOffset(0);
   });
+
+  // Refresh area filter sunny badges
+  if (loadedCafes.length) refreshFilterCounts(loadedCafes);
 
   updateSunStatus(sunData);
 
@@ -593,6 +598,30 @@ function applySunScores() {
   }
 
   return sunData;
+}
+
+/**
+ * Show/hide markers based on the current filter selection.
+ * Also applies z-index rank so top-sorted cafes appear above others.
+ */
+function applyMarkerVisibility(filteredCafes) {
+  if (!sunnyMap) return;
+  const filteredIds = new Set(filteredCafes.map(c => c.id));
+  // rank: first in sorted list = highest z-index
+  const rankMap = new Map(filteredCafes.map((c, i) => [c.id, filteredCafes.length - i]));
+
+  loadedCafes.forEach((cafe, i) => {
+    const marker = cafeMarkers[i];
+    if (!marker) return;
+    if (filteredIds.has(cafe.id)) {
+      if (!sunnyMap.hasLayer(marker)) marker.addTo(sunnyMap);
+      marker.setZIndexOffset(rankMap.get(cafe.id) ?? 0);
+    } else {
+      if (sunnyMap.hasLayer(marker)) marker.remove();
+    }
+  });
+
+  if (selectedCafe && !filteredIds.has(selectedCafe.id)) closeDetailPanel();
 }
 
 function createLeafletIcon(color, options = {}) {
@@ -653,11 +682,41 @@ function getCachedJson(key) {
   }
 }
 
+
+/**
+ * Adapts a cafe from the cafes.js format into the internal Sunside format.
+ * cafes.js uses: { name, lat, lng, hasOutdoorSeating, area, address, facingDegrees, ... }
+ * Internally we use: { id, displayName, location, outdoorSeating, formattedAddress, facingDegrees, ... }
+ */
+function adaptCafe(cafe, index) {
+  return {
+    id:              `static-${index}`,
+    displayName:     { text: cafe.name },
+    location:        { latitude: cafe.lat, longitude: cafe.lng },
+    outdoorSeating:  cafe.hasOutdoorSeating === true  ? true
+                   : cafe.hasOutdoorSeating === false ? false
+                   : undefined,
+    rating:          cafe.rating ?? null,
+    area:            cafe.area ?? "Istanbul", // preserved for area filter
+    formattedAddress: cafe.address
+      ? `${cafe.address}, ${cafe.area ?? "İstanbul"}`
+      : cafe.area ?? "İstanbul",
+    facingDegrees:   cafe.facingDegrees   ?? 180,
+    buildingFloors:  cafe.buildingFloors  ?? 4,
+    tolerance:       cafe.tolerance       ?? 90,
+    phone:           cafe.phone,
+    website:         cafe.website,
+    openingHours:    cafe.openingHours,
+  };
+}
+
 async function fetchPlaces() {
   // Use the hardcoded static cafe list — instant, offline, no API needed.
   // To refresh data, edit src/cafes.js directly.
-  return { places: ISTANBUL_CAFES };
+  const places = ISTANBUL_CAFES.map(adaptCafe);
+  return { places };
 }
+
 
 async function fetchWeather() {
   const cached = getCachedJson(WEATHER_CACHE_KEY);
@@ -1293,6 +1352,128 @@ async function loadBuildingShadowModel(cafes, map) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Street-orientation auto-estimation
+// Queries Overpass for the nearest road, computes the perpendicular bearing
+// from the cafe to that road (= direction the terrace faces), then updates
+// cafe.facingDegrees and refreshes the marker icon live.
+// Results are cached in localStorage so Overpass is only called once per cafe.
+// ---------------------------------------------------------------------------
+
+/**
+ * Find the foot of the perpendicular from point P to line segment A–B.
+ * Uses a planar approximation (valid for distances < ~1 km).
+ * All params and return value are { lat, lng }.
+ */
+function perpendicularFootOnSegment(p, a, b) {
+  const scale = Math.cos((p.lat * Math.PI) / 180);
+  const px = p.lng * scale,  py = p.lat;
+  const ax = a.lng * scale,  ay = a.lat;
+  const bx = b.lng * scale,  by = b.lat;
+  const dx = bx - ax,        dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return { lat: a.lat, lng: a.lng };
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  return { lat: ay + t * dy, lng: (ax + t * dx) / scale };
+}
+
+/**
+ * Compass bearing (0–360°) from point A to point B.
+ */
+function bearingDegrees(a, b) {
+  const dLng = (b.lng - a.lng) * Math.cos((a.lat * Math.PI) / 180);
+  const dLat = b.lat - a.lat;
+  return (Math.atan2(dLng, dLat) * (180 / Math.PI) + 360) % 360;
+}
+
+/**
+ * Query Overpass for the nearest street within 65 m and return the estimated
+ * facingDegrees (bearing from cafe toward the nearest road point).
+ * Returns null if no usable road is found nearby.
+ * Results are cached per-location in localStorage.
+ */
+async function estimateFacingFromStreet(lat, lng) {
+  const CACHE_KEY = `street-facing-v1:${lat.toFixed(5)},${lng.toFixed(5)}`;
+  const cached = localStorage.getItem(CACHE_KEY);
+  if (cached !== null) return cached === "" ? null : Number(cached);
+
+  const highway = "residential|unclassified|tertiary|secondary|pedestrian|footway|service|living_street|path";
+  const query = `[out:json][timeout:10];(way["highway"~"^(${highway})$"](around:65,${lat},${lng}););out geom;`;
+
+  try {
+    const response = await fetch(OVERPASS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `data=${encodeURIComponent(query)}`,
+    });
+
+    if (!response.ok) { localStorage.setItem(CACHE_KEY, ""); return null; }
+
+    const data = await response.json();
+    const cafe = { lat, lng };
+    let nearestDist = Infinity;
+    let nearestFoot = null;
+
+    for (const way of data.elements ?? []) {
+      for (let i = 0; i < (way.geometry ?? []).length - 1; i++) {
+        const a = { lat: way.geometry[i].lat,     lng: way.geometry[i].lon };
+        const b = { lat: way.geometry[i + 1].lat, lng: way.geometry[i + 1].lon };
+        const foot = perpendicularFootOnSegment(cafe, a, b);
+        const dist = haversineMeters(cafe, foot);
+        if (dist < nearestDist) { nearestDist = dist; nearestFoot = foot; }
+      }
+    }
+
+    if (!nearestFoot || nearestDist > 65) {
+      localStorage.setItem(CACHE_KEY, "");
+      return null;
+    }
+
+    const facing = Math.round(bearingDegrees(cafe, nearestFoot));
+    localStorage.setItem(CACHE_KEY, String(facing));
+    return facing;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Background enrichment: estimates facingDegrees for every loaded cafe from
+ * street geometry and live-updates marker icons and the open detail panel.
+ * Runs after initial markers are rendered so the UI is never blocked.
+ */
+async function enrichCafesWithStreetOrientation(cafes) {
+  let updated = 0;
+
+  for (let i = 0; i < cafes.length; i++) {
+    const cafe = cafes[i];
+    const pos  = getPlacePosition(cafe);
+    if (!pos) continue;
+
+    const estimated = await estimateFacingFromStreet(pos.lat, pos.lng);
+
+    if (estimated !== null) {
+      cafe.facingDegrees = estimated;
+      // Widen tolerance slightly for auto-estimated directions
+      if (cafe.tolerance === 90) cafe.tolerance = 100;
+      updated++;
+
+      // Refresh this marker's icon with the refined score
+      const sunData = getSunDataAt(Number(timeSlider.value));
+      if (cafeMarkers[i]) {
+        cafeMarkers[i].setIcon(getMarkerIconForScore(calculateSunScore(cafe, sunData)));
+      }
+      // Refresh the detail panel if this cafe is currently open
+      if (selectedCafe === cafe) renderDetailPanel(cafe, i);
+    }
+
+    await sleep(120); // polite rate-limiting between Overpass requests
+  }
+
+  console.info(`Street orientation enrichment done — ${updated}/${cafes.length} cafes updated`);
+  applySunScores(); // final pass to normalise all markers
+}
+
 async function loadCafes(map) {
   try {
     setCafeStatus("Loading cafes...");
@@ -1301,9 +1482,17 @@ async function loadCafes(map) {
     renderCafeMarkers(map, cafes);
     updateHeroChip();
     console.info("Sunside Places response", data);
+
+    // Initialise area filter bar — show/hide markers on filter change
+    initAreaFilter(loadedCafes, (filteredCafes) => {
+      applyMarkerVisibility(filteredCafes);
+    });
+
     if (ENABLE_SHADOWS) {
       await loadBuildingShadowModel(cafes, map);
     }
+    // Enrich seating directions from street geometry in the background (non-blocking)
+    enrichCafesWithStreetOrientation(cafes);
     startSolarFetches(cafes);
   } catch (error) {
     console.error("Cafe loading failed", error);
@@ -1467,6 +1656,7 @@ async function initMap() {
   fetchWeather();
   getUserLocation().then((position) => {
     userPosition = position;
+    setUserLocation(position.lat, position.lng); // feeds Near Me filter
     renderOpenPanelIfNeeded();
   });
 
@@ -1490,15 +1680,6 @@ async function initMap() {
       },
     ).addTo(map);
 
-    // Cihangir area circle representation
-    L.circle([CIHANGIR.lat, CIHANGIR.lng], {
-      radius: 600,
-      color: "#f6b73c",
-      weight: 1,
-      opacity: 0.28,
-      fillColor: "#f6b73c",
-      fillOpacity: 0.035,
-    }).addTo(map);
 
     createMarkerIcons();
 
