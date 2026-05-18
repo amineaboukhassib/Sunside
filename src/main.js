@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./style.css";
 import { ISTANBUL_CAFES } from "./cafes.js";
+import librariesData from "./libraries.js";
 import { initAreaFilter, refreshFilterCounts, filterCafes, setUserLocation } from "./areaFilter.js";
 
 const CIHANGIR = { lat: 41.0327, lng: 28.9818 };
@@ -89,6 +90,9 @@ const chatSend = document.querySelector("#chat-send");
 
 const markerIcons = {};
 const cafeMarkers = [];
+const libraryMarkers = []; // parallel to loadedLibraries
+let loadedLibraries = [];
+let activePlaceType = 'cafes'; // 'cafes' | 'libraries' | 'both'
 const solarByPlaceId = new Map();
 const solarFailures = new Map();
 const solarPending = new Set();
@@ -518,16 +522,16 @@ function applyFallbackScores(cafes) {
   usingShadowApproximation = false;
 }
 
-function getMarkerIconForScore(score) {
-  if (score >= 70) {
-    return markerIcons.yellow;
+function getMarkerIconForScore(score, placeType = 'cafe') {
+  if (score < 40) {
+    return markerIcons.gray;
   }
 
-  if (score >= 40) {
-    return markerIcons.amber;
+  if (placeType === 'library') {
+    return score >= 70 ? markerIcons.libraryRecommended : markerIcons.library;
   }
 
-  return markerIcons.gray;
+  return score >= 70 ? markerIcons.yellow : markerIcons.amber;
 }
 
 function getScoreTone(score) {
@@ -580,16 +584,27 @@ function applySunScores() {
   resetRecommendationHighlights();
   const sunData = getSunDataAt(Number(timeSlider.value));
 
+  // Score cafes
   cafeMarkers.forEach((marker, index) => {
     const cafe = loadedCafes[index];
     const score = calculateSunScore(cafe, sunData);
     cafe.sunScore = score; // attach for area filter badge counts
-    marker.setIcon(getMarkerIconForScore(score));
+    marker.setIcon(getMarkerIconForScore(score, cafe.placeType));
     marker.setZIndexOffset(0);
   });
 
-  // Refresh area filter sunny badges
-  if (loadedCafes.length) refreshFilterCounts(loadedCafes);
+  // Score libraries
+  libraryMarkers.forEach((marker, index) => {
+    const lib = loadedLibraries[index];
+    const score = calculateSunScore(lib, sunData);
+    lib.sunScore = score;
+    marker.setIcon(getMarkerIconForScore(score, lib.placeType));
+    marker.setZIndexOffset(0);
+  });
+
+  // Refresh area filter sunny badges on combined list
+  const allPlaces = [...loadedCafes, ...loadedLibraries];
+  if (allPlaces.length) refreshFilterCounts(allPlaces);
 
   updateSunStatus(sunData);
 
@@ -601,21 +616,33 @@ function applySunScores() {
 }
 
 /**
- * Show/hide markers based on the current filter selection.
- * Also applies z-index rank so top-sorted cafes appear above others.
+ * Show/hide cafe + library markers based on the current filter selection.
+ * Applies z-index rank so top-sorted cafes appear above others.
  */
-function applyMarkerVisibility(filteredCafes) {
+function applyMarkerVisibility(filteredPlaces) {
   if (!sunnyMap) return;
-  const filteredIds = new Set(filteredCafes.map(c => c.id));
-  // rank: first in sorted list = highest z-index
-  const rankMap = new Map(filteredCafes.map((c, i) => [c.id, filteredCafes.length - i]));
+  const filteredIds = new Set(filteredPlaces.map(c => c.id));
+  const rankMap = new Map(filteredPlaces.map((c, i) => [c.id, filteredPlaces.length - i]));
 
+  // Cafe markers
   loadedCafes.forEach((cafe, i) => {
     const marker = cafeMarkers[i];
     if (!marker) return;
     if (filteredIds.has(cafe.id)) {
       if (!sunnyMap.hasLayer(marker)) marker.addTo(sunnyMap);
       marker.setZIndexOffset(rankMap.get(cafe.id) ?? 0);
+    } else {
+      if (sunnyMap.hasLayer(marker)) marker.remove();
+    }
+  });
+
+  // Library markers
+  loadedLibraries.forEach((lib, i) => {
+    const marker = libraryMarkers[i];
+    if (!marker) return;
+    if (filteredIds.has(lib.id)) {
+      if (!sunnyMap.hasLayer(marker)) marker.addTo(sunnyMap);
+      marker.setZIndexOffset(rankMap.get(lib.id) ?? 0);
     } else {
       if (sunnyMap.hasLayer(marker)) marker.remove();
     }
@@ -658,11 +685,12 @@ function createMarkerIcons() {
   markerIcons.amber = createLeafletIcon("#f59e0b");
   markerIcons.gray = createLeafletIcon("#6b7280");
   markerIcons.recommended = createLeafletIcon("#f59e0b", {
-    size: 42,
-    radius: 12,
-    stroke: "#ffffff",
-    strokeWidth: 3,
-    ring: "#fff7d6",
+    size: 42, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#fff7d6",
+  });
+  // Teal icon for library markers
+  markerIcons.library = createLeafletIcon("#14b8a6", { stroke: "#ccfbf1" });
+  markerIcons.libraryRecommended = createLeafletIcon("#0d9488", {
+    size: 38, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#99f6e4",
   });
 }
 
@@ -697,7 +725,7 @@ function adaptCafe(cafe, index) {
                    : cafe.hasOutdoorSeating === false ? false
                    : undefined,
     rating:          cafe.rating ?? null,
-    area:            cafe.area ?? "Istanbul", // preserved for area filter
+    area:            cafe.area ?? "Istanbul",
     formattedAddress: cafe.address
       ? `${cafe.address}, ${cafe.area ?? "İstanbul"}`
       : cafe.area ?? "İstanbul",
@@ -707,6 +735,31 @@ function adaptCafe(cafe, index) {
     phone:           cafe.phone,
     website:         cafe.website,
     openingHours:    cafe.openingHours,
+    placeType:       'cafe',
+  };
+}
+
+/**
+ * Adapts a GeoJSON library feature into the internal Sunside place format.
+ */
+function adaptLibrary(feature, index) {
+  const [lng, lat] = feature.geometry.coordinates;
+  const p = feature.properties;
+  return {
+    id:              `lib-${index}`,
+    displayName:     { text: p.name },
+    location:        { latitude: lat, longitude: lng },
+    outdoorSeating:  p.hasOutdoorSeating === true  ? true
+                   : p.hasOutdoorSeating === false ? false
+                   : undefined,
+    rating:          null,
+    area:            p.area ?? "Istanbul",
+    formattedAddress: p.address ? `${p.address}` : p.area ?? "İstanbul",
+    facingDegrees:   p.facingDegrees   ?? 180,
+    buildingFloors:  p.buildingFloors  ?? 3,
+    tolerance:       p.tolerance       ?? 90,
+    openingHours:    p.openingHours,
+    placeType:       'library',
   };
 }
 
@@ -1309,6 +1362,55 @@ function renderCafeMarkers(map, cafes) {
   exposeDebugHandles();
 }
 
+function renderLibraryMarkers(map, libraries) {
+  libraryMarkers.forEach((marker) => marker.remove());
+  libraryMarkers.length = 0;
+  loadedLibraries = libraries;
+
+  libraries.forEach((lib, index) => {
+    const position = getPlacePosition(lib);
+
+    if (!position) {
+      console.warn("Skipping library without coordinates", lib);
+      return;
+    }
+
+    const marker = L.marker([position.lat, position.lng], {
+      icon: markerIcons.library,
+      title: getPlaceName(lib),
+    }).addTo(map);
+
+    marker.on("click", () => {
+      console.log("Sunside library marker clicked", lib);
+      resetRecommendationHighlights();
+      applySunScores();
+      openDetailPanel(lib, index);
+    });
+
+    marker.bindTooltip(
+      `<div class="map-tooltip">${escapeHtml(getPlaceName(lib))}</div>`,
+      {
+        permanent: false,
+        direction: "top",
+        offset: [0, -10],
+        opacity: 0.9,
+        className: "custom-leaflet-tooltip",
+      },
+    );
+
+    libraryMarkers.push(marker);
+  });
+
+  applySunScores();
+}
+
+function loadLibraries(map) {
+  if (!librariesData || !librariesData.features) return;
+  const libs = librariesData.features.map(adaptLibrary);
+  renderLibraryMarkers(map, libs);
+  console.info(`Loaded ${libs.length} libraries into Sunside`);
+}
+
 function drawBuildingOverlay(maps, map, buildings) {
   void maps;
   void map;
@@ -1483,9 +1585,13 @@ async function loadCafes(map) {
     updateHeroChip();
     console.info("Sunside Places response", data);
 
+    // Load libraries
+    loadLibraries(map);
+
     // Initialise area filter bar — show/hide markers on filter change
-    initAreaFilter(loadedCafes, (filteredCafes) => {
-      applyMarkerVisibility(filteredCafes);
+    const allPlaces = [...loadedCafes, ...loadedLibraries];
+    initAreaFilter(allPlaces, (filteredPlaces) => {
+      applyMarkerVisibility(filteredPlaces);
     });
 
     if (ENABLE_SHADOWS) {
