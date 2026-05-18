@@ -982,11 +982,11 @@ function showCafeRecommendations(answerText) {
 }
 
 async function askClaude(message) {
-  const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+  const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
 
   if (!apiKey) {
-    appendChatBubble("API key issue — check console for details", "error");
-    console.error("Missing VITE_ANTHROPIC_API_KEY");
+    appendChatBubble("AI chat not configured — add VITE_OPENAI_API_KEY to Railway.", "error");
+    console.error("Missing VITE_OPENAI_API_KEY");
     return;
   }
 
@@ -994,26 +994,26 @@ async function askClaude(message) {
   chatSend.disabled = true;
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-        "content-type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "claude-haiku-4-5",
+        model: "gpt-4o-mini",
         max_tokens: 600,
-        system: buildChatSystemPrompt(),
-        messages: [{ role: "user", content: message }],
+        messages: [
+          { role: "system", content: buildChatSystemPrompt() },
+          { role: "user",   content: message },
+        ],
       }),
     });
 
     const data = await response.json().catch(() => null);
 
     if (!response.ok) {
-      console.error("Claude API error", {
+      console.error("OpenAI API error", {
         status: response.status,
         statusText: response.statusText,
         body: data,
@@ -1022,17 +1022,17 @@ async function askClaude(message) {
       typing.textContent =
         response.status === 401 || response.status === 403
           ? "API key issue — check console for details"
-          : "Hmm, couldn't reach Claude. Try again.";
+          : "Hmm, couldn't reach the AI. Try again.";
       return;
     }
 
-    const answer = data?.content?.[0]?.text ?? "I got an empty response. Try again.";
+    const answer = data?.choices?.[0]?.message?.content ?? "I got an empty response. Try again.";
     typing.textContent = answer;
     showCafeRecommendations(answer);
   } catch (error) {
-    console.error("Claude request failed", error);
+    console.error("OpenAI request failed", error);
     typing.className = "chat-bubble error";
-    typing.textContent = "Hmm, couldn't reach Claude. Try again.";
+    typing.textContent = "Hmm, couldn't reach the AI. Try again.";
   } finally {
     chatSend.disabled = false;
   }
