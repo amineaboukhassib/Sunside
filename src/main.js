@@ -106,7 +106,7 @@ let selectedCafeIndex = -1;
 let googleMapsApi = null; // Preserved for backward compatibility
 let sunnyMap = null;
 let cafeHoverWindow = null; // Preserved for backward compatibility
-let recommendationResetTimer = null;
+let activeRecommendationIds = new Set();
 let usingShadowApproximation = false;
 let buildingStats = {
   count: 0,
@@ -566,15 +566,13 @@ function updateSunStatus(sunData) {
   );
 }
 
-function resetRecommendationHighlights() {
-  if (recommendationResetTimer) {
-    window.clearTimeout(recommendationResetTimer);
-    recommendationResetTimer = null;
+function clearRecommendationHighlights() {
+  activeRecommendationIds.clear();
+  applySunScores();
+  const clearBtn = document.querySelector("#clear-highlights-btn");
+  if (clearBtn) {
+    clearBtn.style.display = "none";
   }
-
-  cafeMarkers.forEach((marker) => {
-    marker.setZIndexOffset(0);
-  });
 }
 
 function applySunScores() {
@@ -582,7 +580,6 @@ function applySunScores() {
     return null;
   }
 
-  resetRecommendationHighlights();
   const sunData = getSunDataAt(Number(timeSlider.value));
 
   // Score cafes
@@ -590,8 +587,14 @@ function applySunScores() {
     const cafe = loadedCafes[index];
     const score = calculateSunScore(cafe, sunData);
     cafe.sunScore = score; // attach for area filter badge counts
-    marker.setIcon(getMarkerIconForScore(score, cafe.placeType));
-    marker.setZIndexOffset(0);
+
+    if (activeRecommendationIds.has(cafe.id)) {
+      marker.setIcon(markerIcons.recommended);
+      marker.setZIndexOffset(1000 + index);
+    } else {
+      marker.setIcon(getMarkerIconForScore(score, cafe.placeType));
+      marker.setZIndexOffset(0);
+    }
   });
 
   // Score libraries
@@ -599,8 +602,14 @@ function applySunScores() {
     const lib = loadedLibraries[index];
     const score = calculateSunScore(lib, sunData);
     lib.sunScore = score;
-    marker.setIcon(getMarkerIconForScore(score, lib.placeType));
-    marker.setZIndexOffset(0);
+
+    if (activeRecommendationIds.has(lib.id)) {
+      marker.setIcon(markerIcons.libraryRecommended);
+      marker.setZIndexOffset(1000 + index);
+    } else {
+      marker.setIcon(getMarkerIconForScore(score, lib.placeType));
+      marker.setZIndexOffset(0);
+    }
   });
 
   // Refresh area filter sunny badges on combined list
@@ -1126,67 +1135,81 @@ function normalizeForMatch(value) {
     .trim();
 }
 
-function getMentionedCafeIndexes(text) {
-  const normalizedText = normalizeForMatch(text);
-  const matches = [];
+function showCafeRecommendations(answerText) {
+  const normalizedText = normalizeForMatch(answerText);
+  const matchedCafes = [];
+  const matchedLibraries = [];
 
+  // Match cafes
   loadedCafes.forEach((cafe, index) => {
     const name = getPlaceName(cafe);
     const normalizedName = normalizeForMatch(name);
-    const usefulTokens = normalizedName
-      .split(" ")
-      .filter((token) => token.length >= 4);
-
-    if (
-      normalizedText.includes(normalizedName) ||
-      usefulTokens.some((token) => normalizedText.includes(token))
-    ) {
-      matches.push(index);
+    const usefulTokens = normalizedName.split(" ").filter((t) => t.length >= 4);
+    if (normalizedText.includes(normalizedName) || usefulTokens.some((t) => normalizedText.includes(t))) {
+      matchedCafes.push({ cafe, index });
     }
   });
 
-  return [...new Set(matches)].slice(0, 5);
-}
+  // Match libraries
+  loadedLibraries.forEach((lib, index) => {
+    const name = getPlaceName(lib);
+    const normalizedName = normalizeForMatch(name);
+    const usefulTokens = normalizedName.split(" ").filter((t) => t.length >= 4);
+    if (normalizedText.includes(normalizedName) || usefulTokens.some((t) => normalizedText.includes(t))) {
+      matchedLibraries.push({ lib, index });
+    }
+  });
 
-function showCafeRecommendations(answerText) {
-  const indexes = getMentionedCafeIndexes(answerText);
-
-  if (!indexes.length || !sunnyMap) {
+  const totalMatches = matchedCafes.length + matchedLibraries.length;
+  if (totalMatches === 0 || !sunnyMap) {
     return;
   }
 
+  // Populate activeRecommendationIds
+  activeRecommendationIds.clear();
+  matchedCafes.forEach(({ cafe }) => activeRecommendationIds.add(cafe.id));
+  matchedLibraries.forEach(({ lib }) => activeRecommendationIds.add(lib.id));
+
+  // Apply visual highlights to the map immediately
   applySunScores();
 
+  // Calculate bounds
   const bounds = L.latLngBounds();
-  indexes.forEach((index) => {
-    const marker = cafeMarkers[index];
-    const cafe = loadedCafes[index];
-    const position = getPlacePosition(cafe);
-
-    if (!marker || !position) {
-      return;
-    }
-
-    marker.setIcon(markerIcons.recommended);
-    marker.setZIndexOffset(1000 + index);
-    bounds.extend([position.lat, position.lng]);
+  matchedCafes.forEach(({ cafe }) => {
+    const pos = getPlacePosition(cafe);
+    if (pos) bounds.extend([pos.lat, pos.lng]);
+  });
+  matchedLibraries.forEach(({ lib }) => {
+    const pos = getPlacePosition(lib);
+    if (pos) bounds.extend([pos.lat, pos.lng]);
   });
 
-  const firstIndex = indexes[0];
-  const firstCafe = loadedCafes[firstIndex];
-
-  if (indexes.length === 1) {
-    sunnyMap.panTo([getPlacePosition(firstCafe).lat, getPlacePosition(firstCafe).lng]);
-    sunnyMap.setZoom(Math.max(sunnyMap.getZoom(), 16));
+  // Pan and zoom
+  if (totalMatches === 1) {
+    const firstPlace = matchedCafes[0]?.cafe || matchedLibraries[0]?.lib;
+    const pos = getPlacePosition(firstPlace);
+    if (pos) {
+      sunnyMap.panTo([pos.lat, pos.lng]);
+      sunnyMap.setZoom(Math.max(sunnyMap.getZoom(), 16));
+    }
   } else {
-    sunnyMap.fitBounds(bounds, { padding: [80, 80] });
+    sunnyMap.fitBounds(bounds, { padding: [80, 80], maxZoom: 16 });
   }
 
-  openDetailPanel(firstCafe, firstIndex);
-  setStatus(`Showing ${indexes.length} Sunside recommendation${indexes.length > 1 ? "s" : ""}`, "ready");
-  recommendationResetTimer = window.setTimeout(() => {
-    applySunScores();
-  }, 12000);
+  // Open first match detail panel
+  if (matchedCafes.length > 0) {
+    openDetailPanel(matchedCafes[0].cafe, matchedCafes[0].index);
+  } else if (matchedLibraries.length > 0) {
+    openDetailPanel(matchedLibraries[0].lib, matchedLibraries[0].index);
+  }
+
+  // Show the clear highlights button
+  const clearBtn = document.querySelector("#clear-highlights-btn");
+  if (clearBtn) {
+    clearBtn.style.display = "inline-flex";
+  }
+
+  setStatus(`Showing ${totalMatches} AI recommendation${totalMatches > 1 ? "s" : ""}`, "ready");
 }
 
 async function askClaude(message) {
@@ -1484,7 +1507,6 @@ function renderCafeMarkers(map, cafes) {
 
     marker.on("click", () => {
       console.log("Sunside cafe marker clicked", cafe);
-      resetRecommendationHighlights();
       applySunScores();
       openDetailPanel(cafe, index);
     });
@@ -1532,7 +1554,6 @@ function renderLibraryMarkers(map, libraries) {
 
     marker.on("click", () => {
       console.log("Sunside library marker clicked", lib);
-      resetRecommendationHighlights();
       applySunScores();
       openDetailPanel(lib, index);
     });
@@ -1969,6 +1990,10 @@ timeSlider.addEventListener("input", () => {
 });
 panelClose.addEventListener("click", closeDetailPanel);
 chatFab.addEventListener("click", () => toggleChat());
+const clearHighlightsBtn = document.querySelector("#clear-highlights-btn");
+if (clearHighlightsBtn) {
+  clearHighlightsBtn.addEventListener("click", () => clearRecommendationHighlights());
+}
 chatClose.addEventListener("click", () => toggleChat(false));
 chatInput.addEventListener("input", autoGrowChatInput);
 chatInput.addEventListener("keydown", (event) => {

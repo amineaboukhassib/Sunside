@@ -48,6 +48,7 @@ input {
   height: 100dvh;
   overflow: hidden;
   isolation: isolate;
+  z-index: 1;
 }
 
 .sunny-shell::after {
@@ -816,4 +817,36 @@ p {
 
 .leaflet-container {
   font-family: inherit !important;
+}
+
+/* Clear Highlights button in brand-panel */
+.clear-highlights-btn {
+  margin-top: 14px;
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.32);
+  color: #fca5a5;
+  border-radius: 99px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.25s ease;
+  width: fit-content;
+  outline: none;
+  font-family: inherit;
+}
+
+.clear-highlights-btn:hover {
+  background: rgba(239, 68, 68, 0.28);
+  border-color: rgba(239, 68, 68, 0.58);
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.16);
+}
+
+.clear-highlights-btn:active {
+  transform: translateY(0);
 }
