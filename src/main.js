@@ -739,26 +739,99 @@ function adaptCafe(cafe, index) {
   };
 }
 
+function mapDistrictToArea(properties) {
+  const district = (properties["addr:district"] ?? "").toLowerCase();
+  const neighbourhood = (properties["addr:neighbourhood"] ?? "").toLowerCase();
+  const suburb = (properties["suburb"] ?? "").toLowerCase();
+
+  if (district.includes("beşiktaş") || neighbourhood.includes("beşiktaş")) {
+    if (neighbourhood.includes("bebek") || suburb.includes("bebek")) return "Bebek";
+    if (neighbourhood.includes("arnavutköy") || suburb.includes("arnavutköy")) return "Arnavutkoy";
+    if (neighbourhood.includes("ortaköy") || suburb.includes("ortaköy")) return "Ortakoy";
+    return "Besiktas";
+  }
+
+  if (district.includes("beyoğlu") || neighbourhood.includes("beyoğlu") || suburb.includes("beyoğlu")) {
+    if (neighbourhood.includes("cihangir")) return "Cihangir";
+    if (neighbourhood.includes("galata")) return "Galata";
+    if (neighbourhood.includes("karaköy")) return "Karakoy";
+    return "Beyoglu";
+  }
+
+  if (district.includes("şişli")) {
+    return "Nisantasi";
+  }
+
+  if (district.includes("fatih")) {
+    if (neighbourhood.includes("sultanahmet")) return "Sultanahmet";
+    if (neighbourhood.includes("balat")) return "Balat";
+    if (neighbourhood.includes("eminönü")) return "Eminonu";
+    return "Sultanahmet";
+  }
+
+  return "Istanbul";
+}
+
+function getOSMAddress(p) {
+  const parts = [];
+  if (p["addr:street"]) {
+    parts.push(p["addr:street"] + (p["addr:housenumber"] ? ` No:${p["addr:housenumber"]}` : ""));
+  }
+  if (p["addr:neighbourhood"]) parts.push(p["addr:neighbourhood"]);
+  if (p["addr:district"]) parts.push(p["addr:district"]);
+  return parts.length > 0 ? parts.join(", ") : "Address unavailable";
+}
+
 /**
  * Adapts a GeoJSON library feature into the internal Sunside place format.
  */
 function adaptLibrary(feature, index) {
-  const [lng, lat] = feature.geometry.coordinates;
   const p = feature.properties;
+  
+  // Extract representative coordinates
+  let lng = 0, lat = 0;
+  const geom = feature.geometry;
+  if (!geom) return null;
+
+  if (geom.type === "Point") {
+    [lng, lat] = geom.coordinates;
+  } else if (geom.type === "Polygon" && geom.coordinates[0]) {
+    const ring = geom.coordinates[0];
+    let sumLng = 0, sumLat = 0;
+    ring.forEach(coord => {
+      sumLng += coord[0];
+      sumLat += coord[1];
+    });
+    lng = sumLng / ring.length;
+    lat = sumLat / ring.length;
+  } else if (geom.type === "MultiPolygon" && geom.coordinates[0] && geom.coordinates[0][0]) {
+    const ring = geom.coordinates[0][0];
+    let sumLng = 0, sumLat = 0;
+    ring.forEach(coord => {
+      sumLng += coord[0];
+      sumLat += coord[1];
+    });
+    lng = sumLng / ring.length;
+    lat = sumLat / ring.length;
+  } else {
+    return null;
+  }
+
+  const area = mapDistrictToArea(p);
+  const name = p.name ?? p["name:en"] ?? p["name:tr"] ?? `Library #${index}`;
+
   return {
     id:              `lib-${index}`,
-    displayName:     { text: p.name },
+    displayName:     { text: name },
     location:        { latitude: lat, longitude: lng },
-    outdoorSeating:  p.hasOutdoorSeating === true  ? true
-                   : p.hasOutdoorSeating === false ? false
-                   : undefined,
+    outdoorSeating:  p.hasOutdoorSeating === true ? true : (p.hasOutdoorSeating === false ? false : true),
     rating:          null,
-    area:            p.area ?? "Istanbul",
-    formattedAddress: p.address ? `${p.address}` : p.area ?? "İstanbul",
-    facingDegrees:   p.facingDegrees   ?? 180,
-    buildingFloors:  p.buildingFloors  ?? 3,
-    tolerance:       p.tolerance       ?? 90,
-    openingHours:    p.openingHours,
+    area:            area,
+    formattedAddress: getOSMAddress(p),
+    facingDegrees:   p.facingDegrees ?? 180,
+    buildingFloors:  p.buildingFloors ?? 3,
+    tolerance:       p.tolerance ?? 90,
+    openingHours:    p.opening_hours ?? p.openingHours ?? "09:00-18:00",
     placeType:       'library',
   };
 }
