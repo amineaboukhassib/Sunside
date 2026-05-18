@@ -982,11 +982,11 @@ function showCafeRecommendations(answerText) {
 }
 
 async function askClaude(message) {
-  const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
+  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
 
   if (!apiKey) {
-    appendChatBubble("AI chat not configured — add VITE_OPENAI_API_KEY to Railway.", "error");
-    console.error("Missing VITE_OPENAI_API_KEY");
+    appendChatBubble("AI chat not configured — add VITE_OPENROUTER_API_KEY to Railway.", "error");
+    console.error("Missing VITE_OPENROUTER_API_KEY");
     return;
   }
 
@@ -994,14 +994,16 @@ async function askClaude(message) {
   chatSend.disabled = true;
 
   try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://sunside-production.up.railway.app",
+        "X-Title": "Sunside",
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "openai/gpt-4o-mini",
         max_tokens: 600,
         messages: [
           { role: "system", content: buildChatSystemPrompt() },
@@ -1013,7 +1015,7 @@ async function askClaude(message) {
     const data = await response.json().catch(() => null);
 
     if (!response.ok) {
-      console.error("OpenAI API error", {
+      console.error("OpenRouter API error", {
         status: response.status,
         statusText: response.statusText,
         body: data,
@@ -1030,7 +1032,7 @@ async function askClaude(message) {
     typing.textContent = answer;
     showCafeRecommendations(answer);
   } catch (error) {
-    console.error("OpenAI request failed", error);
+    console.error("OpenRouter request failed", error);
     typing.className = "chat-bubble error";
     typing.textContent = "Hmm, couldn't reach the AI. Try again.";
   } finally {
