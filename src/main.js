@@ -650,6 +650,22 @@ function applyMarkerVisibility(filteredPlaces) {
   });
 
   if (selectedCafe && !filteredIds.has(selectedCafe.id)) closeDetailPanel();
+
+  // Premium map auto-focus & panning transition
+  const visiblePoints = [];
+  filteredPlaces.forEach(p => {
+    const pos = getPlacePosition(p);
+    if (pos) visiblePoints.push([pos.lat, pos.lng]);
+  });
+
+  if (visiblePoints.length > 0) {
+    if (visiblePoints.length < 25) {
+      const bounds = L.latLngBounds(visiblePoints);
+      sunnyMap.fitBounds(bounds, { maxZoom: 16, padding: [60, 60], animate: true, duration: 0.8 });
+    } else {
+      sunnyMap.setView([CIHANGIR.lat, CIHANGIR.lng], 16, { animate: true, duration: 0.8 });
+    }
+  }
 }
 
 function createLeafletIcon(color, options = {}) {
