@@ -524,7 +524,7 @@ function applyFallbackScores(cafes) {
 
 function getMarkerIconForScore(score, placeType = 'cafe') {
   if (score < 40) {
-    return markerIcons.gray;
+    return placeType === 'library' ? markerIcons.libraryGray : markerIcons.gray;
   }
 
   if (placeType === 'library') {
@@ -659,6 +659,15 @@ function createLeafletIcon(color, options = {}) {
   const ring = options.ring
     ? `<circle cx="20" cy="20" r="17" fill="none" stroke="${options.ring}" stroke-opacity="0.86" stroke-width="3"/>`
     : "";
+  
+  // Custom inner content (like coffee cup or book icon)
+  let innerContent = "";
+  if (options.icon) {
+    innerContent = `<text x="20" y="21" fill="#ffffff" font-size="${options.fontSize ?? '11'}px" text-anchor="middle" dominant-baseline="central" style="pointer-events: none; user-select: none;">${options.icon}</text>`;
+  } else {
+    innerContent = `<circle cx="16" cy="15" r="3.2" fill="rgba(255,255,255,0.38)"/>`;
+  }
+
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40" style="width: ${size}px; height: ${size}px;">
       <defs>
@@ -668,7 +677,7 @@ function createLeafletIcon(color, options = {}) {
       </defs>
       ${ring}
       <circle cx="20" cy="20" r="${radius}" fill="${color}" stroke="${stroke}" stroke-opacity="0.92" stroke-width="${strokeWidth}" filter="url(#shadow)"/>
-      <circle cx="16" cy="15" r="3.2" fill="rgba(255,255,255,0.38)"/>
+      ${innerContent}
     </svg>
   `;
 
@@ -681,17 +690,19 @@ function createLeafletIcon(color, options = {}) {
 }
 
 function createMarkerIcons() {
-  markerIcons.yellow = createLeafletIcon("#fbbf24");
-  markerIcons.amber = createLeafletIcon("#f59e0b");
-  markerIcons.gray = createLeafletIcon("#6b7280");
+  markerIcons.yellow = createLeafletIcon("#fbbf24", { icon: "☕" });
+  markerIcons.amber = createLeafletIcon("#f59e0b", { icon: "☕" });
+  markerIcons.gray = createLeafletIcon("#6b7280", { icon: "☕" });
   markerIcons.recommended = createLeafletIcon("#f59e0b", {
-    size: 42, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#fff7d6",
+    size: 42, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#fff7d6", icon: "☕"
   });
+  
   // Classic Academic Blue icons for library markers
-  markerIcons.library = createLeafletIcon("#3b82f6", { stroke: "#bfdbfe" });
+  markerIcons.library = createLeafletIcon("#3b82f6", { stroke: "#bfdbfe", icon: "📚" });
   markerIcons.libraryRecommended = createLeafletIcon("#1d4ed8", {
-    size: 38, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#dbeafe",
+    size: 38, radius: 12, stroke: "#ffffff", strokeWidth: 3, ring: "#dbeafe", icon: "📚"
   });
+  markerIcons.libraryGray = createLeafletIcon("#6b7280", { stroke: "#bfdbfe", icon: "📚" });
 }
 
 function getCachedJson(key) {
