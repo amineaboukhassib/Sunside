@@ -2,6 +2,7 @@ import SunCalc from "suncalc";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./style.css";
+import { ISTANBUL_CAFES } from "./cafes.js";
 
 const CIHANGIR = { lat: 41.0327, lng: 28.9818 };
 const TAKSIM = { lat: 41.0369, lng: 28.985 };
@@ -150,10 +151,20 @@ function getSunDataAt(hour) {
 }
 
 /**
- * Look up seating-direction metadata for a cafe by name.
- * Falls back to a 360°-arc default so unknown cafes are never penalised.
+ * Look up seating-direction metadata for a cafe.
+ * Priority: (1) data embedded directly on cafe object, (2) name-match in DB, (3) safe default.
  */
 function getSeatingMeta(cafe) {
+  // Prefer data embedded directly on the cafe object (from cafes.js)
+  if (typeof cafe.facingDegrees === "number") {
+    return {
+      facingDegrees:  cafe.facingDegrees,
+      buildingFloors: cafe.buildingFloors ?? 4,
+      tolerance:      cafe.tolerance      ?? 90,
+    };
+  }
+
+  // Fall back to name-matching against the DB
   const name = getPlaceName(cafe).toLowerCase();
   for (const entry of CIHANGIR_SEATING_DB) {
     if (name.includes(entry.name.toLowerCase()) ||
@@ -161,7 +172,8 @@ function getSeatingMeta(cafe) {
       return entry;
     }
   }
-  // Unknown cafe: assume south-facing with full 360° tolerance (never 0 from direction alone)
+
+  // Unknown cafe: full 360° tolerance so it's never penalised by direction alone
   return { facingDegrees: 180, buildingFloors: 4, tolerance: 180 };
 }
 
@@ -642,75 +654,9 @@ function getCachedJson(key) {
 }
 
 async function fetchPlaces() {
-  const cached = getCachedJson(PLACES_CACHE_KEY);
-
-  if (cached?.places) {
-    return cached;
-  }
-
-  setCafeStatus("Loading cafes...");
-
-  // Free Overpass query to find cafes in Cihangir
-  const query = `[out:json][timeout:25];
-  (
-    node["amenity"="cafe"](around:600,${CIHANGIR.lat},${CIHANGIR.lng});
-    way["amenity"="cafe"](around:600,${CIHANGIR.lat},${CIHANGIR.lng});
-  );
-  out center;`;
-
-  const response = await fetch(OVERPASS_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: `data=${encodeURIComponent(query)}`,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Overpass API error ${response.status}`);
-  }
-
-  const data = await response.json();
-  const cafes = [];
-
-  const elements = data.elements ?? [];
-  elements.forEach((element) => {
-    if (element.tags && element.tags.name) {
-      const lat = element.lat ?? element.center?.lat;
-      const lng = element.lon ?? element.center?.lng;
-      if (lat && lng) {
-        let outdoorSeating = undefined;
-        if (element.tags.outdoor_seating === "yes") {
-          outdoorSeating = true;
-        } else if (element.tags.outdoor_seating === "no") {
-          outdoorSeating = false;
-        }
-
-        const rating = 4.2 + (Math.abs(element.id) % 7) * 0.1;
-
-        const street = element.tags["addr:street"] || "";
-        const house = element.tags["addr:housenumber"] || "";
-        const formattedAddress = street
-          ? `${street} No: ${house}, Cihangir, İstanbul`
-          : "Cihangir, Beyoğlu, İstanbul";
-
-        cafes.push({
-          id: `osm-${element.id}`,
-          displayName: { text: element.tags.name },
-          location: { latitude: lat, longitude: lng },
-          outdoorSeating: outdoorSeating,
-          rating: rating,
-          formattedAddress: formattedAddress,
-        });
-      }
-    }
-  });
-
-  const sortedCafes = cafes.sort((a, b) => b.rating - a.rating).slice(0, 20);
-
-  const result = { places: sortedCafes };
-  localStorage.setItem(PLACES_CACHE_KEY, JSON.stringify(result));
-  return result;
+  // Use the hardcoded static cafe list — instant, offline, no API needed.
+  // To refresh data, edit src/cafes.js directly.
+  return { places: ISTANBUL_CAFES };
 }
 
 async function fetchWeather() {
